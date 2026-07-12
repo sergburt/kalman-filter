@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "lowpoint-biosignals"
+version = "0.1.0"
+description = "Robust lower-envelope approximation for ECG and other biosignals"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {text = "MIT"}
+authors = [{name = "LowPoint Biosignals project"}]
+dependencies = [
+  "numpy>=2.0",
+  "scipy>=1.13",
+  "pandas>=2.2",
+]
+
+[project.optional-dependencies]
+app = [
+  "streamlit>=1.41",
+  "plotly>=5.24",
+]
+validation = [
+  "matplotlib>=3.9",
+  "wfdb>=4.1",
+]
+dev = [
+  "pytest>=8.3",
+  "pytest-cov>=6.0",
+  "ruff>=0.9",
+]
+
+[project.scripts]
+lowpoint = "lowpoint.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lowpoint"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+

@@ -1,0 +1,222 @@
+[
+  {
+    "scenario": "ecg_clean_noise",
+    "method": "guarded_minima",
+    "runs": 5,
+    "rmse_mean": 0.0233664445174459,
+    "rmse_std": 0.0032444484598631073,
+    "bias_mean": 0.017811505424677535,
+    "tail_fraction_mean": 0.0064,
+    "runtime_ms_median": 1.025000000026921,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "ecg_clean_noise",
+    "method": "quantile_tau_0.01",
+    "runs": 5,
+    "rmse_mean": 0.08460114896857662,
+    "rmse_std": 0.000676021006303268,
+    "bias_mean": 0.011552507475289077,
+    "tail_fraction_mean": 0.01,
+    "runtime_ms_median": 100.99170000012236,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "ecg_clean_noise",
+    "method": "quantile_tau_0.05",
+    "runs": 5,
+    "rmse_mean": 0.169913107287115,
+    "rmse_std": 0.0009018694146893712,
+    "bias_mean": 0.15455974593464,
+    "tail_fraction_mean": 0.04988,
+    "runtime_ms_median": 117.19629999970493,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "ecg_clean_noise",
+    "method": "causal_kalman",
+    "runs": 5,
+    "rmse_mean": 0.1942735340324484,
+    "rmse_std": 0.0007522040458796911,
+    "bias_mean": 0.1590737924337172,
+    "tail_fraction_mean": 0.16452,
+    "runtime_ms_median": 157.06509999972695,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "ecg_clean_noise",
+    "method": "middle_whittaker",
+    "runs": 5,
+    "rmse_mean": 0.3355043396852979,
+    "rmse_std": 0.0001608890643356376,
+    "bias_mean": 0.33485056896773013,
+    "tail_fraction_mean": 0.7068800000000001,
+    "runtime_ms_median": 3.3158999999614025,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "ecg_with_negative_impulses",
+    "method": "guarded_minima",
+    "runs": 5,
+    "rmse_mean": 0.022136550669403638,
+    "rmse_std": 0.0013837723358496082,
+    "bias_mean": 0.016921249760077257,
+    "tail_fraction_mean": 0.006279999999999999,
+    "runtime_ms_median": 1.0078000000248721,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "ecg_with_negative_impulses",
+    "method": "quantile_tau_0.01",
+    "runs": 5,
+    "rmse_mean": 0.08424455791837374,
+    "rmse_std": 0.0005774066391336838,
+    "bias_mean": 0.004955832177905047,
+    "tail_fraction_mean": 0.01008,
+    "runtime_ms_median": 103.04360000009183,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "ecg_with_negative_impulses",
+    "method": "quantile_tau_0.05",
+    "runs": 5,
+    "rmse_mean": 0.16985115090454778,
+    "rmse_std": 0.0008592818146444408,
+    "bias_mean": 0.15440493648993572,
+    "tail_fraction_mean": 0.0498,
+    "runtime_ms_median": 112.57430000023305,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "ecg_with_negative_impulses",
+    "method": "causal_kalman",
+    "runs": 5,
+    "rmse_mean": 0.19553753748129576,
+    "rmse_std": 0.0024766546337729937,
+    "bias_mean": 0.160879646562947,
+    "tail_fraction_mean": 0.16499999999999998,
+    "runtime_ms_median": 156.61910000017087,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "ecg_with_negative_impulses",
+    "method": "middle_whittaker",
+    "runs": 5,
+    "rmse_mean": 0.33513078676256214,
+    "rmse_std": 0.0002954533185421141,
+    "bias_mean": 0.3344749288291681,
+    "tail_fraction_mean": 0.70648,
+    "runtime_ms_median": 3.0267000001913402,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "generic_clean_noise",
+    "method": "quantile_tau_0.05",
+    "runs": 5,
+    "rmse_mean": 0.009281996241695262,
+    "rmse_std": 0.001590742993846203,
+    "bias_mean": 0.005362338333869086,
+    "tail_fraction_mean": 0.0492,
+    "runtime_ms_median": 27.61370000007446,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "generic_clean_noise",
+    "method": "quantile_tau_0.01",
+    "runs": 5,
+    "rmse_mean": 0.020704529119142112,
+    "rmse_std": 0.0018495592823012455,
+    "bias_mean": -0.01908679306272515,
+    "tail_fraction_mean": 0.009600000000000001,
+    "runtime_ms_median": 55.96670000022641,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "generic_clean_noise",
+    "method": "guarded_minima",
+    "runs": 5,
+    "rmse_mean": 0.0455544515648644,
+    "rmse_std": 0.0095950825249373,
+    "bias_mean": -0.025887034768771237,
+    "tail_fraction_mean": 0.0162,
+    "runtime_ms_median": 0.8570999998482876,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "generic_clean_noise",
+    "method": "causal_kalman",
+    "runs": 5,
+    "rmse_mean": 0.20489430218546872,
+    "rmse_std": 0.0013937964550705822,
+    "bias_mean": 0.04506566122293257,
+    "tail_fraction_mean": 0.1787,
+    "runtime_ms_median": 63.46579999990354,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "generic_clean_noise",
+    "method": "middle_whittaker",
+    "runs": 5,
+    "rmse_mean": 0.46893160811752754,
+    "rmse_std": 0.0006073429113291067,
+    "bias_mean": 0.4654004957049313,
+    "tail_fraction_mean": 0.49959999999999993,
+    "runtime_ms_median": 1.5424999996866973,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "generic_with_negative_impulses",
+    "method": "quantile_tau_0.05",
+    "runs": 5,
+    "rmse_mean": 0.009023168982397658,
+    "rmse_std": 0.00117554486091274,
+    "bias_mean": 0.004553133582971125,
+    "tail_fraction_mean": 0.0495,
+    "runtime_ms_median": 24.339099999906466,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "generic_with_negative_impulses",
+    "method": "quantile_tau_0.01",
+    "runs": 5,
+    "rmse_mean": 0.024479439767276033,
+    "rmse_std": 0.004298304954992588,
+    "bias_mean": -0.022329456442422724,
+    "tail_fraction_mean": 0.0097,
+    "runtime_ms_median": 82.43820000006963,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "generic_with_negative_impulses",
+    "method": "guarded_minima",
+    "runs": 5,
+    "rmse_mean": 0.10789367325311669,
+    "rmse_std": 0.07904261514190594,
+    "bias_mean": -0.046745960788344074,
+    "tail_fraction_mean": 0.0041,
+    "runtime_ms_median": 0.7798999999977241,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "generic_with_negative_impulses",
+    "method": "causal_kalman",
+    "runs": 5,
+    "rmse_mean": 0.20922561166358528,
+    "rmse_std": 0.0038134747531206256,
+    "bias_mean": 0.039900667284277,
+    "tail_fraction_mean": 0.17959999999999998,
+    "runtime_ms_median": 64.5886000002065,
+    "convergence_rate": 1.0
+  },
+  {
+    "scenario": "generic_with_negative_impulses",
+    "method": "middle_whittaker",
+    "runs": 5,
+    "rmse_mean": 0.4662121763029674,
+    "rmse_std": 0.000503417172874036,
+    "bias_mean": 0.46278941403666246,
+    "tail_fraction_mean": 0.49829999999999997,
+    "runtime_ms_median": 1.579799999944953,
+    "convergence_rate": 1.0
+  }
+]

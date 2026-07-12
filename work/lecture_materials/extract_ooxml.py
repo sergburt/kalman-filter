@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import hashlib
 import json
 import posixpath
@@ -332,7 +333,45 @@ def main() -> None:
     }
     args.output_json.parent.mkdir(parents=True, exist_ok=True)
     args.output_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"deck_count": payload["deck_count"], "total_slides": payload["total_slides"], "output": str(args.output_json)}))
+    slides_tsv = args.output_json.with_name("all_slide_index.tsv")
+    links_tsv = args.output_json.with_name("external_links.tsv")
+    with slides_tsv.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f, delimiter="\t")
+        writer.writerow(["deck", "slide", "title", "title_method", "text", "speaker_notes", "pictures", "tables", "charts"])
+        for deck in decks:
+            for slide in deck["slides"]:
+                writer.writerow(
+                    [
+                        deck["filename"],
+                        slide["slide"],
+                        slide["title"],
+                        slide["title_method"],
+                        " | ".join(slide["text"]),
+                        " | ".join(slide["notes"]),
+                        slide["object_counts"].get("picture", 0),
+                        slide["object_counts"].get("table", 0),
+                        slide["object_counts"].get("chart", 0),
+                    ]
+                )
+    with links_tsv.open("w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.writer(f, delimiter="\t")
+        writer.writerow(["deck", "slide", "title", "url"])
+        for deck in decks:
+            for slide in deck["slides"]:
+                for url in slide["references"]["urls"]:
+                    if url and url != "NULL":
+                        writer.writerow([deck["filename"], slide["slide"], slide["title"], url])
+    print(
+        json.dumps(
+            {
+                "deck_count": payload["deck_count"],
+                "total_slides": payload["total_slides"],
+                "output": str(args.output_json),
+                "slide_index": str(slides_tsv),
+                "links": str(links_tsv),
+            }
+        )
+    )
 
 
 if __name__ == "__main__":

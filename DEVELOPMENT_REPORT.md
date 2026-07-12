@@ -1020,7 +1020,7 @@ No diagnostic wording should be used before this separate process.
 ### 10.1 Installation
 
 ```powershell
-uv sync --extra app --extra validation --extra dev
+uv sync --extra validation --extra dev
 ```
 
 The exact resolved environment is recorded in `uv.lock`.

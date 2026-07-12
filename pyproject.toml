@@ -14,13 +14,11 @@ dependencies = [
   "numpy>=2.0",
   "scipy>=1.13",
   "pandas>=2.2",
-]
-
-[project.optional-dependencies]
-app = [
   "streamlit>=1.41",
   "plotly>=5.24",
 ]
+
+[project.optional-dependencies]
 validation = [
   "matplotlib>=3.9",
   "wfdb>=4.1",
@@ -48,4 +46,3 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
-

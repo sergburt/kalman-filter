@@ -29,11 +29,17 @@ The full mathematical, biomedical, validation, risk, and implementation discussi
 Python 3.11 or newer and [`uv`](https://docs.astral.sh/uv/) are recommended.
 
 ```powershell
-uv sync --extra app --extra validation --extra dev
+uv sync --extra validation --extra dev
 uv run streamlit run app.py
 ```
 
 Then open the local address shown by Streamlit. The built-in ECG example requires no data file.
+
+### Streamlit Community Cloud
+
+Deploy `app.py` from the repository root and keep both `pyproject.toml` and `uv.lock` committed.
+`streamlit` and `plotly` are default project dependencies because Community Cloud synchronizes the
+default lockfile environment; optional extras are not installed during a normal deployment.
 
 Run the tests and benchmark:
 

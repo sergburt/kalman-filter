@@ -1011,15 +1011,13 @@ dependencies = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pandas" },
+    { name = "plotly" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "streamlit" },
 ]
 
 [package.optional-dependencies]
-app = [
-    { name = "plotly" },
-    { name = "streamlit" },
-]
 dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
@@ -1035,15 +1033,15 @@ requires-dist = [
     { name = "matplotlib", marker = "extra == 'validation'", specifier = ">=3.9" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "pandas", specifier = ">=2.2" },
-    { name = "plotly", marker = "extra == 'app'", specifier = ">=5.24" },
+    { name = "plotly", specifier = ">=5.24" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
     { name = "scipy", specifier = ">=1.13" },
-    { name = "streamlit", marker = "extra == 'app'", specifier = ">=1.41" },
+    { name = "streamlit", specifier = ">=1.41" },
     { name = "wfdb", marker = "extra == 'validation'", specifier = ">=4.1" },
 ]
-provides-extras = ["app", "validation", "dev"]
+provides-extras = ["validation", "dev"]
 
 [[package]]
 name = "markupsafe"

@@ -10,7 +10,97 @@ from numpy.typing import NDArray
 
 Method = Literal["quantile", "minima", "kalman"]
 Side = Literal["lower", "upper"]
+FilterPhase = Literal["zero_phase", "causal"]
+BaselineMethod = Literal["none", "median", "highpass"]
 SOFTWARE_VERSION = "0.1.0"
+
+
+@dataclass(frozen=True)
+class SignalFilterConfig:
+    """Optional conditioning applied before lower-envelope estimation.
+
+    All stages are disabled by default. Filter order is the per-pass design
+    order; zero-phase forward/backward processing doubles the effective order.
+    """
+
+    phase_mode: FilterPhase = "zero_phase"
+
+    mains_enabled: bool = False
+    mains_frequency_hz: float = 50.0
+    mains_quality_factor: float = 30.0
+    mains_harmonics: int = 1
+
+    highpass_enabled: bool = False
+    highpass_cutoff_hz: float = 0.5
+    highpass_order: int = 2
+
+    lowpass_enabled: bool = False
+    lowpass_cutoff_hz: float = 40.0
+    lowpass_order: int = 4
+
+    baseline_method: BaselineMethod = "none"
+    baseline_window_seconds: float = 0.8
+    baseline_cutoff_hz: float = 0.5
+    baseline_order: int = 2
+
+    @property
+    def enabled(self) -> bool:
+        return bool(
+            self.mains_enabled
+            or self.highpass_enabled
+            or self.lowpass_enabled
+            or self.baseline_method != "none"
+        )
+
+    def validate(self, sampling_rate: float) -> None:
+        if not np.isfinite(sampling_rate) or sampling_rate <= 0:
+            raise ValueError("sampling_rate must be positive and finite")
+        if self.phase_mode not in {"zero_phase", "causal"}:
+            raise ValueError("phase_mode must be 'zero_phase' or 'causal'")
+        if self.baseline_method not in {"none", "median", "highpass"}:
+            raise ValueError("baseline_method must be 'none', 'median', or 'highpass'")
+
+        nyquist = sampling_rate / 2.0
+        if self.mains_enabled:
+            _validate_frequency(self.mains_frequency_hz, nyquist, "mains_frequency_hz")
+            if not np.isfinite(self.mains_quality_factor) or self.mains_quality_factor <= 0:
+                raise ValueError("mains_quality_factor must be positive and finite")
+            _validate_integer(self.mains_harmonics, "mains_harmonics", 1, 20)
+
+        if self.highpass_enabled:
+            _validate_frequency(self.highpass_cutoff_hz, nyquist, "highpass_cutoff_hz")
+            _validate_integer(self.highpass_order, "highpass_order", 1, 12)
+        if self.lowpass_enabled:
+            _validate_frequency(self.lowpass_cutoff_hz, nyquist, "lowpass_cutoff_hz")
+            _validate_integer(self.lowpass_order, "lowpass_order", 1, 12)
+        if (
+            self.highpass_enabled
+            and self.lowpass_enabled
+            and self.highpass_cutoff_hz >= self.lowpass_cutoff_hz
+        ):
+            raise ValueError("highpass_cutoff_hz must be below lowpass_cutoff_hz")
+
+        if self.baseline_method == "median":
+            if not np.isfinite(self.baseline_window_seconds) or self.baseline_window_seconds <= 0:
+                raise ValueError("baseline_window_seconds must be positive and finite")
+        elif self.baseline_method == "highpass":
+            _validate_frequency(self.baseline_cutoff_hz, nyquist, "baseline_cutoff_hz")
+            _validate_integer(self.baseline_order, "baseline_order", 1, 12)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+def _validate_frequency(value: float, nyquist: float, name: str) -> None:
+    if not np.isfinite(value) or not 0 < value < nyquist:
+        raise ValueError(f"{name} must be finite and strictly between 0 and Nyquist")
+
+
+def _validate_integer(value: int, name: str, minimum: int, maximum: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)):
+        raise ValueError(f"{name} must be an integer")
+    if not minimum <= int(value) <= maximum:
+        raise ValueError(f"{name} must be in [{minimum}, {maximum}]")
 
 
 @dataclass(frozen=True)
@@ -111,3 +201,29 @@ class EnvelopeResult:
             raise ValueError("approximation, residual, and valid_mask lengths must match")
         if len(self.support_indices) != len(self.support_values):
             raise ValueError("support_indices and support_values lengths must match")
+
+
+@dataclass
+class SignalFilterResult:
+    """Conditioning output with raw/prepared/processed provenance."""
+
+    raw_signal: NDArray[np.float64]
+    prepared_signal: NDArray[np.float64]
+    processed_signal: NDArray[np.float64]
+    baseline_estimate: NDArray[np.float64]
+    removed_component: NDArray[np.float64]
+    valid_mask: NDArray[np.bool_]
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+    config: SignalFilterConfig = field(default_factory=SignalFilterConfig)
+
+    def __post_init__(self) -> None:
+        n = len(self.raw_signal)
+        arrays = (
+            self.prepared_signal,
+            self.processed_signal,
+            self.baseline_estimate,
+            self.removed_component,
+            self.valid_mask,
+        )
+        if any(len(array) != n for array in arrays):
+            raise ValueError("all signal-filter result arrays must have matching lengths")

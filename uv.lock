@@ -1038,7 +1038,7 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9" },
     { name = "scipy", specifier = ">=1.13" },
-    { name = "streamlit", specifier = ">=1.41" },
+    { name = "streamlit", specifier = ">=1.59" },
     { name = "wfdb", marker = "extra == 'validation'", specifier = ">=4.1" },
 ]
 provides-extras = ["validation", "dev"]

@@ -16,6 +16,8 @@ def minima_spline(
     y: NDArray[np.float64],
     sampling_rate: float,
     config: EnvelopeConfig,
+    *,
+    valid_mask: NDArray[np.bool_] | None = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.int64], NDArray[np.float64], dict[str, Any]]:
     """Fit a shape-preserving curve through robust block minima.
 
@@ -32,6 +34,7 @@ def minima_spline(
         config.minima_overlap,
         config.guard_seconds,
         config.outlier_sigma,
+        valid_mask=valid_mask,
     )
     if indices.size == 0:
         approximation = np.full_like(y, np.min(y))

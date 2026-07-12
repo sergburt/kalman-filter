@@ -129,6 +129,23 @@ def test_kalman_is_prefix_causal_after_same_warmup() -> None:
     np.testing.assert_allclose(full[:600], prefix, atol=1e-12)
 
 
+def test_kalman_zero_warmup_is_invariant_to_extreme_future_scale() -> None:
+    rng = np.random.default_rng(20260712)
+    prefix_signal = rng.normal(size=100)
+    prefix_signal[10] = -100.0
+    hostile_suffix = np.tile(np.array([-1000.0, 1000.0]), 450)
+    full_signal = np.concatenate([prefix_signal, hostile_suffix])
+    config = EnvelopeConfig(method="kalman", kalman_warmup_seconds=0.0)
+
+    prefix = estimate_envelope(prefix_signal, 100.0, config)
+    full = estimate_envelope(full_signal, 100.0, config)
+
+    np.testing.assert_allclose(full.approximation[: prefix_signal.size], prefix.approximation)
+    assert full.diagnostics["causal"] is True
+    assert full.diagnostics["algorithmic_lookahead_samples"] == 0
+    assert full.diagnostics["normalization_scope"] == "initialization_window"
+
+
 def test_nan_result_preserves_original_validity_mask() -> None:
     signal = np.sin(np.linspace(0, 10, 500))
     signal[100:110] = np.nan
@@ -136,3 +153,57 @@ def test_nan_result_preserves_original_validity_mask() -> None:
     assert np.all(np.isfinite(result.approximation))
     assert not np.any(result.valid_mask[100:110])
     assert result.diagnostics["interpolated_sample_count"] == 10
+
+
+@pytest.mark.parametrize("method", ["quantile", "minima", "kalman"])
+def test_low_point_supports_never_use_interpolated_samples(method: str) -> None:
+    signal = np.array([np.nan, np.nan, 0.0, 1.0, 2.0])
+    result = estimate_envelope(
+        signal,
+        10.0,
+        EnvelopeConfig(
+            method=method,
+            smoothness_hz=2.0,
+            minima_window_seconds=1.0,
+            guard_seconds=0.0,
+            kalman_warmup_seconds=0.0,
+        ),
+    )
+
+    assert result.support_indices.size >= 1
+    assert np.all(result.valid_mask[result.support_indices])
+    assert not np.any(result.support_indices < 2)
+
+
+@pytest.mark.parametrize(
+    ("sample_count", "sampling_rate", "cutoff_hz"),
+    [(2500, 500.0, 0.005), (436, 125.0, 0.001561)],
+)
+def test_quantile_rejects_unidentifiable_subcycle_bandwidths(
+    sample_count: int, sampling_rate: float, cutoff_hz: float
+) -> None:
+    signal = np.random.default_rng(77).normal(size=sample_count)
+
+    with pytest.raises(ValueError, match="at least one nominal cutoff cycle"):
+        estimate_envelope(
+            signal,
+            sampling_rate,
+            EnvelopeConfig(method="quantile", smoothness_hz=cutoff_hz),
+        )
+
+
+def test_quantile_banded_solver_is_stable_at_one_record_cycle() -> None:
+    signal = np.random.default_rng(77).normal(size=2500)
+    result = estimate_envelope(
+        signal,
+        500.0,
+        EnvelopeConfig(method="quantile", smoothness_hz=0.2, max_iterations=20),
+    )
+
+    assert result.diagnostics["linear_solver"] == "symmetric_banded_cholesky"
+    assert result.diagnostics["nominal_cutoff_cycles_in_record"] == pytest.approx(1.0)
+    assert result.diagnostics["objective_initial"] >= 0.0
+    assert result.diagnostics["objective_final"] >= 0.0
+    assert result.diagnostics["objective_monotone"] is True
+    assert result.diagnostics["max_linear_system_relative_residual"] < 1e-5
+    assert np.ptp(result.approximation) < np.ptp(signal)

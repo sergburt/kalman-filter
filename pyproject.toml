@@ -14,7 +14,7 @@ dependencies = [
   "numpy>=2.0",
   "scipy>=1.13",
   "pandas>=2.2",
-  "streamlit>=1.41",
+  "streamlit>=1.59",
   "plotly>=5.24",
 ]
 

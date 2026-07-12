@@ -16,6 +16,8 @@ def asymmetric_kalman(
     y: NDArray[np.float64],
     sampling_rate: float,
     config: EnvelopeConfig,
+    *,
+    valid_mask: NDArray[np.bool_] | None = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.int64], NDArray[np.float64], dict[str, Any]]:
     """Track a low *expectile* online with a local-linear-trend state model.
 
@@ -25,7 +27,10 @@ def asymmetric_kalman(
     diagnostics and the UI.
     """
 
-    location, scale = robust_location_scale(y)
+    warmup = min(y.size, max(1, int(round(config.kalman_warmup_seconds * sampling_rate))))
+    # Keep the online recursion prefix-invariant: only the explicitly declared
+    # initialization interval may influence the fixed robust normalization.
+    location, scale = robust_location_scale(y[:warmup])
     work = (y - location) / scale
     dt = 1.0 / sampling_rate
     transition = np.array([[1.0, dt], [0.0, 1.0]], dtype=np.float64)
@@ -36,7 +41,6 @@ def asymmetric_kalman(
     )
     identity = np.eye(2, dtype=np.float64)
 
-    warmup = min(y.size, max(1, int(round(config.kalman_warmup_seconds * sampling_rate))))
     initial_level = float(np.quantile(work[:warmup], config.quantile))
     state = np.array([initial_level, 0.0], dtype=np.float64)
     covariance = np.diag([1.0, 1.0]).astype(np.float64)
@@ -75,15 +79,18 @@ def asymmetric_kalman(
         config.minima_overlap,
         config.guard_seconds,
         config.outlier_sigma,
+        valid_mask=valid_mask,
     )
     diagnostics: dict[str, Any] = {
         "algorithm": "causal_asymmetric_local_linear_kalman",
         "target_type": "expectile-like (not an exact quantile)",
         "iterations": 1,
         "converged": True,
-        "causal": True,
-        "algorithmic_lookahead_samples": 0,
+        "causal": warmup <= 1,
+        "causal_after_initialization": True,
+        "algorithmic_lookahead_samples": max(0, int(warmup) - 1),
         "warmup_samples": int(warmup),
+        "normalization_scope": "initialization_window",
         "clipped_innovations": int(clipped_innovations),
         "normalization_location": location,
         "normalization_scale": scale,

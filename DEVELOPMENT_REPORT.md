@@ -39,18 +39,22 @@ The v0.1 application therefore implements and clearly labels three modes:
 - **Guarded block minima with PCHIP** — the literal lowest-point reference. It selects one
   short-median-guarded minimum per overlapping window, rejects amplitude-inconsistent supports,
   and uses shape-preserving interpolation.
-- **Causal asymmetric Kalman tracker** — an experimental, zero-look-ahead lower-tail tracker. It
-  estimates an expectile-like path, not an exact quantile, and the validation results show that it
-  should not be the default.
+- **Asymmetric Kalman tracker** — an experimental expectile-like local-linear tracker, not an exact
+  quantile estimator. It is causal after initialization, but the default 2 s warm-up estimates its
+  initial level from future startup samples; zero warm-up removes that startup lookahead. Its weak
+  validation results show that it should not be the default.
 
 The deliverable includes:
 
 - a Streamlit/Plotly application with synthetic ECG and CSV/TSV input;
 - a UI-independent scientific core;
+- optional, disabled-by-default signal conditioning with mains notches/harmonics, Butterworth
+  high-pass and low-pass filters, numerical baseline removal, and offline/causal phase modes;
 - lower and upper envelopes via exact sign duality;
-- missing-value provenance, support points, diagnostics, and export;
+- explicit raw/conditioned coordinate systems, missing-value provenance, support points,
+  diagnostics, and export;
 - a command-line interface;
-- 32 automated tests;
+- 72 automated tests;
 - 100 synthetic method/scenario benchmark runs;
 - additive-drift smoke tests on streamed PhysioNet MIT-BIH and QT ECG segments;
 - machine-readable validation tables and figures;
@@ -65,7 +69,7 @@ The strongest measured findings are:
 - On two real ECG segments with a known added drift, the quantile method recovered the drift with
   RMSE **0.0189 mV** (MIT-BIH record 100) and **0.0315 mV** (QT record `sel100`). These are small
   smoke tests, not clinical validation.
-- All 32 tests and all lint checks pass. Browser tests covered the built-in ECG path, both primary
+- All 72 tests and all lint checks pass. Browser tests covered the built-in ECG path, both primary
   offline estimators, file upload, result refresh, charts, diagnostics, and export controls with no
   console errors or warnings.
 
@@ -73,6 +77,8 @@ The immediate recommendation is:
 
 - use the **quantile** method for a robust, smooth generic lower outline;
 - use **minima** mode when the scientific target is explicitly a recurring trough trajectory;
+- keep signal conditioning disabled unless a documented interference-removal requirement justifies
+  it, and interpret every envelope in the resulting conditioned coordinate system;
 - do not subtract either result from diagnostic ECG and call it “baseline correction”;
 - build a separately named, QRS-gated PR/TP estimator before any physiological ECG baseline claim.
 
@@ -284,29 +290,104 @@ weak validation performance confirms that it should remain experimental.
 
 ## 4. Implemented algorithm specification
 
-### 4.1 Common preprocessing
+### 4.1 Signal preparation and optional conditioning
 
-The public pipeline accepts a one-dimensional, effectively uniformly sampled signal and a sampling
-rate in hertz.
+The public workflow accepts a one-dimensional, effectively uniformly sampled signal and a sampling
+rate in hertz. It separates finite-value preparation, optional acquisition-noise conditioning, and
+envelope estimation so that filtering can never be mistaken for part of the lower-envelope
+objective.
 
-1. Convert to 64-bit floating point without mutating the caller's array.
-2. Require at least five samples and at least three finite values.
-3. Linearly interpolate missing interior samples; use nearest finite values at missing endpoints.
-4. Preserve an exact `valid_mask` so interpolated values are never represented as original data.
-5. Robustly standardize:
+#### Mandatory finite-value preparation
+
+Both public entry points convert to 64-bit floating point without mutating the caller's array,
+require at least five samples and at least three finite values, and retain an exact `valid_mask`.
+With the offline/default preparation policy, missing interior values are linearly interpolated and
+missing endpoints use the nearest finite value. The envelope metrics combine this mask with any
+mask supplied by an earlier conditioning step, so filled samples are not counted as observations.
+The same combined mask is passed into guarded support extraction: a block with no originally valid
+sample is skipped, and an interpolated or forward-filled sample can never be returned or plotted as
+a low-point support.
+
+Robust standardization is estimator-specific rather than universal. The quantile and Kalman modes
+use
 
 \[
 x_i=\frac{y_i-m}{s},\qquad
 m=\operatorname{median}(y),\quad
-s=1.4826\operatorname{MAD}(y).
+s=1.4826\operatorname{MAD}(y),
 \]
 
-IQR, standard deviation, and finally 1.0 are used as ordered fallbacks for a degenerate scale. This
-normalization gives translation and positive-scale equivariance and makes solver tolerances mostly
-independent of signal units.
+with IQR, standard deviation, and finally 1.0 as ordered fallbacks for a degenerate scale. This
+gives translation and positive-scale equivariance and makes their numerical tolerances and Kalman
+covariances mostly independent of signal units. Guarded-minima/PCHIP operates directly in the
+prepared signal's amplitude units.
 
-No high-pass filter is silently applied. Such a filter would destroy the very low-frequency
-behavior the estimator is meant to study.
+#### Disabled-by-default conditioning
+
+`preprocess_signal(..., SignalFilterConfig(...))` implements explicit optional conditioning. Every
+stage is off by default; therefore a finite signal passes through unchanged unless the caller or UI
+enables a stage. The fixed order is:
+
+1. one or more second-order IIR notches at the selected mains fundamental and its requested
+   harmonics below Nyquist;
+2. one numerical baseline-removal method: moving median or Butterworth high-pass;
+3. a general Butterworth high-pass;
+4. a general Butterworth low-pass.
+
+| Conditioning control | Default | Behavior when enabled |
+|---|---:|---|
+| `phase_mode` | `zero_phase` | Offline forward/backward IIR or single-pass `causal` processing |
+| `mains_enabled` | `False` | Notch at `mains_frequency_hz`; 50, 60, and custom Hz are exposed in the UI |
+| `mains_quality_factor` | 30 | Notch selectivity; larger (Q) is narrower |
+| `mains_harmonics` | 1 | Sequential harmonics; frequencies at/above Nyquist are skipped and reported |
+| `baseline_method` | `none` | `median` or `highpass`; these are numerical transforms, not physiological claims |
+| `baseline_window_seconds` | 0.8 s | Odd moving-median window |
+| `baseline_cutoff_hz`, `baseline_order` | 0.5 Hz, 2 | Butterworth high-pass used as the baseline-removal stage |
+| `highpass_enabled` | `False` | General high-pass; default configured cutoff/order are 0.5 Hz/2 per pass |
+| `lowpass_enabled` | `False` | General low-pass; default configured cutoff/order are 40 Hz/4 per pass |
+
+The fundamental notch and all enabled cutoffs must lie strictly below Nyquist. Harmonics that cross
+Nyquist are skipped with their frequencies recorded. Enabling both baseline high-pass and general
+high-pass is allowed but generates a warning because their attenuation compounds. Records with
+fewer than three cycles at a high-pass cutoff also generate an edge/transient warning.
+
+No filter is silently activated. High-pass, low-pass, notch, and median operations can all change
+the waveform and the scientific target, so they require an explicit configuration and separate
+application validation.
+
+#### Phase and missing-data semantics
+
+In `zero_phase` mode, IIR stages use forward/backward second-order-section filtering. This removes
+phase shift but uses future data and doubles each stage's effective order. A centered median uses
+reflected boundary samples. Signals too short for the required forward/backward padding are
+rejected rather than silently processed differently.
+
+In `causal` mode, IIR stages are single-pass and initialized at the first sample; moving-median
+baseline removal uses a trailing window. Interior gaps are forward-filled, and a leading gap is
+rejected because filling it would require future information. Causal filtering still has phase lag
+and startup transients. Offline linear gap interpolation, centered medians, and forward/backward
+filters are not causal.
+
+#### Coordinate and provenance contract
+
+`SignalFilterResult` returns `raw_signal`, finite `prepared_signal`, final `processed_signal`, the
+baseline-stage estimate, the total removed component, the original `valid_mask`, full configuration,
+and stage diagnostics. The total removed component is
+
+\[
+r_{\mathrm{removed}}=y_{\mathrm{prepared}}-y_{\mathrm{processed}},
+\]
+
+so it includes all enabled stages and is not generally identical to `baseline_estimate`. The
+envelope estimator receives `processed_signal`; consequently its approximation and residual live in
+conditioned coordinates:
+
+\[
+r_{\mathrm{envelope}}=y_{\mathrm{processed}}-\hat L(y_{\mathrm{processed}}).
+\]
+
+The app, CSV headers, manifest, and plots use these explicit names. Synthetic truth RMSE is shown
+only when conditioning is inactive, because activating a filter changes the target coordinate.
 
 ### 4.2 Primary method: penalized quantile Whittaker smoother
 
@@ -335,7 +416,7 @@ As \(\epsilon\rightarrow0\), this converges to the check loss. At IRLS iteration
 w_i^{(k)}=\frac{1}{2\sqrt{(x_i-z_i^{(k)})^2+\epsilon^2}}.
 \]
 
-The next estimate solves the sparse banded system
+The next estimate solves the symmetric positive-definite pentadiagonal system
 
 \[
 \left(W^{(k)}+\lambda D^{2\top}D^2\right)z^{(k+1)}
@@ -346,8 +427,10 @@ The sign of the constant term is important. With \(\tau<0.5\), it moves the solu
 calibration test checks that the empirical fraction below the lower curve is near \(\tau\); a
 reversed sign would produce approximately \(1-\tau\).
 
-The code monitors the smoothed convex objective and applies step-halving if floating-point error
-would increase it. It stops on relative parameter change or the iteration limit.
+The code evaluates roughness directly as the nonnegative sum of squared second differences rather
+than as (z^\top D^{2\top}D^2z), whose expanded form can catastrophically cancel for very smooth
+curves. It monitors the smoothed convex objective, applies step-halving if floating-point error
+would increase it, and stops on relative parameter change or the iteration limit.
 
 Default values are:
 
@@ -380,6 +463,19 @@ This mapping is exact for the symmetric least-squares smoother and serves as a p
 interpretable convention for the quantile objective. Quantile loss changes the exact nonlinear
 frequency behavior, so `smoothness_hz` should still be validated for the application.
 
+At least one nominal cutoff cycle must fit in the observed record:
+
+\[
+f_cN/f_s\geq 1.
+\]
+
+Slower requests are unidentifiable from the available duration and can also make the Whittaker
+system numerically singular; the core rejects them with the record-specific minimum bandwidth and
+recommends a longer record or downsampling. The pentadiagonal system is solved with symmetric
+banded Cholesky after uniform scaling, and every solve must pass a relative equation-residual
+check. These guards were added after adversarial tests reproduced both an explicit singular solve
+and a finite but physically nonsensical curve in the former sparse solve.
+
 #### Initialization and boundaries
 
 A rolling local percentile initializes the global convex iteration; it is not the final answer.
@@ -389,8 +485,8 @@ beats and extrema. Edge performance is reported as a validation concern rather t
 
 #### Complexity
 
-The second-difference normal matrix is pentadiagonal. Sparse direct solves are approximately linear
-in \(N\) for this banded structure, repeated for \(J\) iterations:
+The second-difference normal matrix is pentadiagonal. Symmetric banded Cholesky solves are linear
+in \(N\) for fixed bandwidth, repeated for \(J\) iterations:
 
 \[
 T=O(JN),\qquad M=O(N).
@@ -438,8 +534,19 @@ The state is local level and slope:
 F=\begin{bmatrix}1&\Delta t\\0&1\end{bmatrix}.
 \]
 
-The process covariance uses an integrated-acceleration form. For innovation
-\(e_k=y_k-H\mathbf x_k^-\), the observation variance is modified by an asymmetric weight:
+With \(\Delta t=1/f_s\), the discrete sampled-acceleration process covariance is
+
+\[
+Q_k=q
+\begin{bmatrix}
+\Delta t^4/4&\Delta t^3/2\\
+\Delta t^3/2&\Delta t^2
+\end{bmatrix}.
+\]
+
+The coefficient `kalman_process_variance` is the normalized acceleration variance \(q\), not a
+continuous-time spectral density. For innovation \(e_k=y_k-H\mathbf x_k^-\), the normalized
+observation variance is modified by an asymmetric weight:
 
 \[
 \omega_k=
@@ -453,12 +560,31 @@ R_{\mathrm{eff}}=R/\omega_k.
 
 Negative observations therefore influence a lower tracker more strongly than positive ones.
 Innovations are clipped at a configurable number of predicted standard deviations, and covariance
-uses the Joseph update.
+uses the Joseph update. The four exposed controls are:
 
-This is a causal, zero-look-ahead **expectile-like** estimator. It is not the MAP solution of the
-pinball objective and does not guarantee quantile calibration. The real-data smoke tests showed
-substantial drift-tracking error. It is retained to support research and to demonstrate why an
-ordinary/asymmetrically weighted Gaussian Kalman approximation is not sufficient.
+| Parameter | Default | Interpretation after fixed initialization-window normalization |
+|---|---:|---|
+| `kalman_process_variance` | (2\times10^{-4}) | Sampled acceleration variance (q); larger values follow changes faster |
+| `kalman_measurement_variance` | 0.08 | Base observation variance (R); larger values smooth more strongly |
+| `kalman_innovation_clip` | 4.0 | Innovation limit in predicted standard deviations |
+| `kalman_warmup_seconds` | 2.0 s | Leading interval used to fix location, scale, and initial lower level |
+
+The warm-up is an explicit startup lookahead. For
+\(n_w=\min(N,\max(1,\operatorname{round}(f_sT_w)))\), the first emitted values depend on all
+\(n_w\) initialization samples, and diagnostics report `algorithmic_lookahead_samples = n_w-1`.
+After initialization, location and scale remain fixed from this interval only; no later suffix is
+used for normalization. A hostile-future-suffix regression test verifies prefix invariance under
+that contract. Setting `kalman_warmup_seconds=0` gives one-sample initialization and zero startup
+lookahead. A single sample cannot estimate amplitude dispersion, so the robust-scale cascade falls
+back to one signal unit in that strict-causal configuration. Q and R are then raw-unit dependent;
+changing the signal's amplitude unit requires retuning them.
+
+This is an **expectile-like** estimator, not the MAP solution of the pinball objective, and it does
+not guarantee quantile calibration. A causal **approximation path** additionally requires causal
+conditioning and no offline gap interpolation. Causal IIR stages can still introduce lag and
+startup transients. Guarded support markers and whole-record quality metrics are batch diagnostics,
+not streaming outputs. The real-data smoke tests showed substantial drift-tracking error, so this
+mode is retained for research rather than accepted as the default.
 
 ### 4.5 Upper-envelope duality
 
@@ -473,13 +599,14 @@ inverted sensors or leads whose scientifically relevant edge is numerically high
 
 ### 4.6 Diagnostics
 
-Each result contains:
+The conditioning result contains raw, prepared, processed, baseline-estimate, and total-removed
+arrays; original validity; ordered stage metadata; phase/gap policy; RMS summaries; warnings; and
+the complete `SignalFilterConfig`. The envelope result contains:
 
-- approximation array;
-- raw-minus-approximation residual;
-- original valid-sample mask;
-- support indices and values;
-- algorithm name and full configuration;
+- approximation and `conditioned_signal - approximation` residual arrays;
+- original valid-sample mask propagated through conditioning;
+- guarded support indices and values;
+- algorithm name and full `EnvelopeConfig`;
 - convergence state and iterations;
 - empirical tail fraction and coverage error where meaningful;
 - pinball loss;
@@ -488,7 +615,15 @@ Each result contains:
 - normalization values;
 - method-specific warnings and counts.
 
-The export manifest stores the exact input source name, configuration, and diagnostics.
+Only minima mode uses guarded supports to construct its curve. Quantile and Kalman modes return the
+same support family as a diagnostic overlay; those points do not constrain either estimate. In all
+three modes, support candidates are restricted to originally valid samples even though the finite
+prepared signal is used for numerical continuity.
+
+The Streamlit manifest stores input identity, uploaded-file content hash where applicable,
+conditioning and envelope configurations, both diagnostic sets, coordinate definitions, and
+approximation-path causality flags. It explicitly states that support markers and summary metrics
+are not streaming-ready outputs.
 
 ---
 
@@ -501,7 +636,8 @@ The export manifest stores the exact input source name, configuration, and diagn
 - Preserve raw data and make every interpolation/transform visible.
 - Produce deterministic, serializable provenance.
 - Permit command-line, notebook, UI, and future API use through one pipeline.
-- Avoid requiring WFDB, Streamlit, or Plotly for the core library.
+- Keep scientific modules free of Streamlit, Plotly, and WFDB imports. The deployed distribution
+  includes the UI dependencies by default; WFDB remains validation-only.
 
 ### 5.2 Implemented structure
 
@@ -517,6 +653,7 @@ Kalman Filter/
 │   ├── __init__.py
 │   ├── models.py
 │   ├── preprocessing.py
+│   ├── filtering.py
 │   ├── support.py
 │   ├── quantile.py
 │   ├── minima.py
@@ -529,6 +666,7 @@ Kalman Filter/
 ├── tests/
 │   ├── test_models.py
 │   ├── test_preprocessing.py
+│   ├── test_filtering.py
 │   ├── test_estimators.py
 │   └── test_io.py
 ├── scripts/
@@ -549,35 +687,50 @@ Kalman Filter/
 ```mermaid
 flowchart LR
     A["CSV/TSV or synthetic signal"] --> B["Schema and sampling checks"]
-    B --> C["Finite-value preparation + valid mask"]
-    C --> D{"Estimator"}
-    D -->|"quantile"| E["Sparse quantile Whittaker IRLS"]
+    B --> C["Raw preservation + phase-specific gap policy"]
+    C --> K["Optional conditioning (off by default)"]
+    K -->|"notch → baseline → HP → LP"| L["Conditioned signal + provenance"]
+    L --> D{"Envelope estimator"}
+    D -->|"quantile"| E["Banded quantile Whittaker IRLS"]
     D -->|"minima"| F["Guarded supports + PCHIP"]
     D -->|"kalman"| G["Causal asymmetric tracker"]
     E --> H["EnvelopeResult"]
     F --> H
     G --> H
     H --> I["Coverage, loss, roughness, warnings"]
-    I --> J["Plot, CSV, JSON manifest, CLI"]
+    L --> J["Raw/conditioned/baseline/removed export"]
+    I --> J
+    J --> M["Plot, explicit CSV, JSON manifest, CLI"]
 ```
 
 ### 5.4 Public Python interface
 
 ```python
-from lowpoint import EnvelopeConfig, estimate_envelope
+from lowpoint import EnvelopeConfig, SignalFilterConfig, estimate_envelope, preprocess_signal
 
-result = estimate_envelope(
+conditioning = preprocess_signal(
     samples,
     sampling_rate=250.0,
-    config=EnvelopeConfig(
-        method="quantile",
-        quantile=0.05,
-        smoothness_hz=0.35,
+    config=SignalFilterConfig(
+        phase_mode="zero_phase",
+        mains_enabled=True,
+        mains_frequency_hz=50.0,
+        mains_harmonics=2,
+        lowpass_enabled=True,
+        lowpass_cutoff_hz=40.0,
     ),
+)
+result = estimate_envelope(
+    conditioning.processed_signal,
+    sampling_rate=250.0,
+    config=EnvelopeConfig(method="quantile", quantile=0.05, smoothness_hz=0.35),
+    valid_mask=conditioning.valid_mask,
 )
 ```
 
-The core returns data rather than plotting or writing files. This makes it testable and reusable.
+`SignalFilterConfig()` with no enabled stages preserves a finite input exactly. Both core calls
+return data and provenance rather than plotting or writing files, which keeps them independently
+testable and reusable.
 
 ### 5.5 Application behavior
 
@@ -589,12 +742,19 @@ The Streamlit app supports:
 - numeric signal/time column selection, with time columns explicitly interpreted as seconds;
 - sampling-rate inference from a strictly increasing time column;
 - warning for more than 1% robust timestamp-interval jitter;
-- lower/upper side, method, quantile, bandwidth, block, guard, and advanced controls;
-- raw, envelope, truth (synthetic only), isoelectric drift (synthetic only), supports, and residual
-  plots;
+- a disabled-by-default conditioning master switch and controls for phase mode, 50/60/custom mains
+  notch, quality factor, harmonics, high-pass, low-pass, and median/high-pass baseline removal;
+- full Kalman controls for initialization-normalized (Q), initialization-normalized (R), innovation
+  clipping, and warm-up, including displayed startup lookahead and approximation-path causality;
+- lower/upper side, method, quantile/asymmetry, bandwidth, block, guard, and advanced controls;
+- a record-duration lower bound for quantile bandwidth so fewer than one nominal cutoff cycle
+  cannot enter the numerical solver;
+- separate raw-versus-conditioned, conditioned-plus-envelope, and conditioned-residual plots;
+- truth and isoelectric drift overlays only for an unconditioned synthetic lower-envelope run;
 - method-specific metrics rather than misleading quantile metrics for minima;
-- processed CSV and reproducibility-manifest downloads;
-- stale-result invalidation whenever input or parameters change.
+- explicit-coordinate CSV and reproducibility-manifest downloads;
+- stale-result invalidation whenever input, uploaded-file content, conditioning, or envelope
+  parameters change.
 
 The last two behaviors were improved during real browser testing.
 
@@ -606,13 +766,21 @@ The CLI processes tabular data reproducibly:
 uv run lowpoint input.csv output.csv `
   --signal-column ECG `
   --time-column time_s `
+  --filter-phase zero-phase `
+  --mains-hz 50 `
+  --mains-harmonics 2 `
+  --lowpass-hz 40 `
   --method quantile `
   --quantile 0.05 `
   --smoothness-hz 0.35
 ```
 
-The output contains time, original signal, envelope, signal-minus-envelope, and original-validity
-mask.
+The CLI exposes the same mains (Q)/harmonic, high-pass/low-pass cutoff and order, numerical
+baseline, and phase controls, plus all four Kalman controls. With no conditioning-enabling flags,
+all filter stages are bypassed. Its output columns are exactly `time_s`, `raw_signal`,
+`conditioned_signal`, `estimated_baseline`, `removed_component`, `envelope_on_conditioned`,
+`conditioned_minus_envelope`, and `original_sample_valid`. JSON printed to standard output stores
+both configurations and diagnostic sets and declares the envelope/residual coordinate.
 
 ---
 
@@ -620,25 +788,40 @@ mask.
 
 ### 6.1 Automated tests
 
-Thirty-two tests pass. They cover:
+Seventy-two tests pass. They cover:
 
 - configuration ranges and Nyquist checking;
 - one-dimensional/length validation;
-- missing-value interpolation and mask preservation;
+- missing-value interpolation and mask preservation, including exclusion of filled samples from
+  guarded support selection in every estimator;
 - robust-scale fallback on constant data;
 - constant-signal invariance for all three methods;
 - translation and positive-scale equivariance;
 - lower/upper sign duality;
 - monotonic objective history;
+- stable symmetric-banded quantile solves at the one-cycle limit, nonnegative objective values,
+  equation-residual checks, and rejection of adversarial subcycle bandwidths;
 - monotonic movement of the fitted curve as the requested quantile increases;
 - physical-cutoff stability when the sampling rate changes;
 - low-tail placement rather than center placement;
 - bounded effect of one extremely deep negative impulse on the quantile curve;
 - exact PCHIP contact at returned guarded supports;
-- causal prefix invariance of the Kalman output after identical warm-up;
+- causal prefix invariance of the Kalman output after identical warm-up, including a hostile
+  future-suffix case that verifies initialization-window-only normalization;
+- disabled-conditioning identity and caller-array nonmutation;
+- offline linear gap filling, causal forward filling, leading-gap rejection, and validity-mask
+  propagation into envelope metrics;
+- 50/60 Hz notch and harmonic suppression in zero-phase and causal modes, including Nyquist skips;
+- high-pass slow-tone suppression and low-pass fast-tone suppression with passband preservation;
+- centered-median and high-pass baseline recovery on known synthetic drift;
+- zero-phase impulse alignment/symmetry and causal prefix invariance for multistage filters and a
+  trailing median;
+- invalid filter configurations, short zero-phase records, and oversized median windows;
 - CSV delimiter detection;
-- sampling-rate inference.
+- sampling-rate inference;
 - CLI processing with consistent timestamps and rejection of inconsistent explicit rates.
+- Streamlit default, conditioned, causal-Kalman, retained-hidden-state, and failed-validation paths,
+  including stale-result clearing.
 
 Command:
 
@@ -649,7 +832,7 @@ uv run pytest -q
 Result:
 
 ```text
-32 passed
+72 passed
 ```
 
 Ruff lint also reports `All checks passed!`.
@@ -689,9 +872,9 @@ Mean truth RMSE across five seeds per scenario:
 | Scenario | Middle | Quantile 5% | Quantile 1% | Guarded minima | Causal Kalman |
 |---|---:|---:|---:|---:|---:|
 | Generic, ordinary noise | 0.46893 | **0.00928** | 0.02070 | 0.04555 | 0.20489 |
-| Generic + negative impulses | 0.46621 | **0.00902** | 0.02448 | 0.10789 | 0.20923 |
-| ECG trough, ordinary noise | 0.33550 | 0.16991 | 0.08460 | **0.02337** | 0.19427 |
-| ECG trough + negative impulses | 0.33513 | 0.16985 | 0.08424 | **0.02214** | 0.19554 |
+| Generic + negative impulses | 0.46621 | **0.00902** | 0.02448 | 0.10789 | 0.20915 |
+| ECG trough, ordinary noise | 0.33550 | 0.16991 | 0.08460 | **0.02337** | 0.19301 |
+| ECG trough + negative impulses | 0.33513 | 0.16985 | 0.08424 | **0.02214** | 0.19387 |
 
 Interpretation:
 
@@ -707,10 +890,10 @@ Interpretation:
   one-sample impulses without erasing the designed S trough.
 - The causal Kalman approximation did not provide competitive accuracy.
 
-All quantile fits in this benchmark converged under the configured stopping criterion. Median
-runtime ranged from about 24–28 ms for a 2,000-sample generic 5% fit and 113–117 ms for a
-5,000-sample ECG fit in the recorded environment. Guarded minima was about 1 ms. These are
-engineering observations on one machine, not controlled performance claims.
+All quantile fits in this benchmark converged under the configured stopping criterion. With the
+symmetric banded solver, median runtime was about 7–8 ms for a 2,000-sample generic 5% fit and
+24 ms for a 5,000-sample ECG fit in the recorded environment. Guarded minima was about 1 ms. These
+are engineering observations on one machine, not controlled performance claims.
 
 ![Synthetic validation comparison](artifacts/synthetic_validation.png)
 
@@ -863,11 +1046,38 @@ Keep `edge_padding_seconds=0` for ECG unless a study demonstrates that reflectio
 Reflection can mirror a partial QRS complex into a fictitious beat. Non-ECG periodic signals may
 benefit from padding, but edge errors should always be reported separately.
 
-### 7.6 Causal use
+### 7.6 Conditioning and phase
 
-Do not assume the experimental Kalman mode is equivalent to the offline quantile fit. A centered
-offline curve necessarily uses future data. The preferred future streaming design is a fixed-lag
-quantile MAP solver with provisional recent samples and frozen older output.
+Leave conditioning disabled until a specific interference mechanism and downstream acceptance
+endpoint are defined.
+
+- Use a mains notch only at the known acquisition frequency. Add harmonics deliberately and check
+  that no requested notch overlaps physiological content or approaches Nyquist.
+- Choose high-pass and low-pass cutoffs from the sensor bandwidth and intended measurements, not
+  from a generic ECG preset. Both can change amplitudes, durations, slopes, and ST/T morphology.
+- Treat moving-median and high-pass baseline removal as numerical coordinate transforms. Neither is
+  the unimplemented QRS-gated PR/TP isoelectric estimator.
+- Avoid enabling both baseline high-pass and general high-pass unless the compounded response is
+  intentional and measured.
+- Use `zero_phase` only offline. It avoids phase shift but uses future data, doubles effective IIR
+  order, and has edge-padding requirements. Use `causal` for streaming and quantify its lag and
+  startup transient.
+- Evaluate the envelope on the conditioned target and report the raw, conditioned, baseline,
+  removed-component, and residual coordinates separately.
+
+### 7.7 Causal use
+
+Do not assume the experimental Kalman mode is equivalent to the offline quantile fit. Its default
+2 s initialization interval creates explicit startup lookahead; set warm-up to zero for one-sample
+initialization. A causal approximation path also requires causal conditioning, causal gap filling,
+and a finite first sample. The app reports `approximation_path_causal` and
+`approximation_path_causal_after_initialization`; it separately marks support points and summary
+metrics as offline diagnostics. With zero warm-up the normalization scale falls back to one signal
+unit, so Q/R must be tuned for the input amplitude unit.
+
+A centered offline quantile/minima curve necessarily uses future data. The preferred future
+streaming quantile design is a fixed-lag MAP solver with provisional recent samples and frozen older
+output.
 
 ---
 
@@ -882,12 +1092,22 @@ quantile MAP solver with provisional recent samples and frozen older output.
 | Sustained motion/electrode artifact | Indistinguishable from low physiology in one channel | Diagnostics and research warning | Accelerometer/impedance/SQI inputs, confidence trace |
 | Window too short/long | Extra or missed troughs | Physical-time control and visible supports | Beat-synchronous regions |
 | Very small \(\tau\) | Too few local tail samples | Validation range and coverage diagnostics | Automatic effective-sample warning |
+| Quantile bandwidth below one record cycle | Unidentifiable trend and ill-conditioned solve | Dynamic UI/core lower bound, banded solve, residual check | Multirate/downsample assistant |
 | Spline support desert | Unidentifiable trajectory between contacts | Constant endpoint policy, visible supports | Confidence decay and gap segmentation |
+| Filled gap sample shown as a measured trough | Fabricated support evidence | Combined validity mask restricts every support candidate | Gap-aware confidence intervals |
 | Natural/interpolated curve crosses samples | Not a strict geometric envelope | Method is named approximation, not hard minorant | Slack-constrained convex mode |
-| Long NaN gap | Smooth curve bridges unsupported interval | Valid mask retained | Gap threshold, segment fits, confidence output |
+| Raw and conditioned coordinates confused | Wrong amplitude/residual interpretation | Explicit plot/CSV names and manifest definitions | Schema-versioned downstream contracts |
+| Generic median/high-pass baseline called isoelectric | Can erase or redefine physiological content | Separate “numerical baseline removal” warning; disabled default | QRS-gated PR/TP module and morphology validation |
+| Notch or HP/LP overlaps signal content | Amplitude, duration, ST/T, or timing distortion | Explicit enable, cutoff/order/Q diagnostics, raw overlay | Sensor-specific frequency-response acceptance tests |
+| Zero-phase conditioning treated as online | Future leakage and optimistic latency | Offline label and causality flags | Streaming deployment guardrails |
+| Causal conditioning lag/transient ignored | Timing bias near startup or rapid changes | Single-pass label, short-record warnings, raw comparison | Per-stage delay and settling-time characterization |
+| Zero-warm-up Kalman scale treated as unit-free | Q/R silently change meaning across amplitude units | UI/report disclose one-sample scale fallback | Causal online scale state with equivariance tests |
+| Baseline and general high-pass both enabled | Compounded attenuation | UI/core warning | Display composite frequency response |
+| Long NaN gap | Smooth curve bridges unsupported interval | Phase-specific fill policy and valid mask retained | Gap threshold, segment fits, confidence output |
 | Timestamp jitter | Hertz parameter loses meaning | UI warning above 1% | Explicit irregular-time basis or resampling workflow |
 | Edge bias | First/last region unreliable | Reflection off; endpoint policy disclosed | Edge confidence and one-sided models |
 | Kalman target mismatch | Poor calibration and drift tracking | Explicit experimental label; validation evidence | Asymmetric-Laplace/fixed-lag convex filter |
+| Kalman warm-up treated as zero lookahead | Future leakage during initialization | Reported lookahead samples/seconds; zero-warm-up control | Withhold provisional startup outputs |
 | ST/T distortion after subtraction | Potential false clinical interpretation | No baseline-correction claim | Locked morphology gates and clinical review |
 | Patient data in OneDrive workspace | Governance/privacy risk | Raw data ignored and not committed | Approved storage, access controls, DPIA/security review |
 
@@ -1070,7 +1290,7 @@ tool where possible.
 | Approximation below the middle | Pass | Quantile/minima curves and synthetic benchmarks |
 | Robust generic lower outline | Pass for research use | 5% calibration and 0.009 mean synthetic RMSE |
 | Literal lowest-point trajectory | Pass for regular synthetic cycles | Guarded supports and 0.023 ECG-trough RMSE |
-| Missing-value transparency | Pass | `valid_mask`, interpolation tests, diagnostics |
+| Missing-value transparency | Pass | `valid_mask`, interpolation tests, support-candidate exclusion, diagnostics |
 | Physical-time parameters | Pass | Hz and seconds used in public configuration |
 | Reproducible UI and CLI | Pass | locked environment, manifest, browser test |
 | Real ECG smoke behavior | Pass with caveats | two streamed PhysioNet intervals |

@@ -16,6 +16,8 @@ def guarded_block_minima(
     overlap: float,
     guard_seconds: float,
     outlier_sigma: float,
+    *,
+    valid_mask: NDArray[np.bool_] | None = None,
 ) -> tuple[NDArray[np.int64], NDArray[np.float64], dict[str, float | int]]:
     """Extract one robust minimum from each overlapping block.
 
@@ -26,6 +28,12 @@ def guarded_block_minima(
     """
 
     n = y.size
+    if valid_mask is None:
+        valid = np.ones(n, dtype=bool)
+    else:
+        valid = np.asarray(valid_mask, dtype=bool)
+        if valid.ndim != 1 or valid.size != n:
+            raise ValueError("valid_mask must be one-dimensional and match y")
     guard = odd_sample_count(guard_seconds, sampling_rate, minimum=1)
     if guard > 1:
         guarded = median_filter(y, size=guard, mode="reflect")
@@ -41,9 +49,15 @@ def guarded_block_minima(
         starts.append(last_start)
 
     candidates: dict[int, float] = {}
+    skipped_empty_blocks = 0
     for start in starts:
         stop = min(n, start + window)
-        local = int(np.argmin(guarded[start:stop])) + start
+        valid_offsets = np.flatnonzero(valid[start:stop])
+        if valid_offsets.size == 0:
+            skipped_empty_blocks += 1
+            continue
+        local_values = guarded[start:stop][valid_offsets]
+        local = int(valid_offsets[int(np.argmin(local_values))]) + start
         candidates[local] = float(guarded[local])
 
     indices = np.asarray(sorted(candidates), dtype=np.int64)
@@ -70,5 +84,6 @@ def guarded_block_minima(
         "stride_samples": int(stride),
         "raw_support_count": raw_count,
         "rejected_support_count": raw_count - int(indices.size),
+        "support_blocks_without_original_samples": skipped_empty_blocks,
     }
     return indices, values, diagnostics

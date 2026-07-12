@@ -19,17 +19,27 @@ def estimate_envelope(
     signal: ArrayLike,
     sampling_rate: float,
     config: EnvelopeConfig | None = None,
+    *,
+    valid_mask: ArrayLike | None = None,
 ) -> EnvelopeResult:
     """Estimate a lower or upper signal envelope.
 
     Missing values are interpolated for numerical continuity while ``valid_mask``
-    records which values were genuinely observed. The raw input is never filtered
-    or mutated in place.
+    records which values were genuinely observed. A supplied ``valid_mask`` is
+    combined with the mask derived from ``signal`` so preprocessing provenance is
+    preserved. The input is never mutated in place.
     """
 
     config = config or EnvelopeConfig()
     config.validate(sampling_rate)
-    y, valid_mask = prepare_signal(signal)
+    y, prepared_mask = prepare_signal(signal)
+    if valid_mask is None:
+        effective_valid_mask = prepared_mask
+    else:
+        supplied_mask = np.asarray(valid_mask, dtype=bool)
+        if supplied_mask.ndim != 1 or supplied_mask.size != y.size:
+            raise ValueError("valid_mask must be one-dimensional and match the signal length")
+        effective_valid_mask = prepared_mask & supplied_mask
 
     # All implementations solve a lower-tail problem. Mirroring provides exact
     # lower/upper symmetry and avoids duplicated, divergent algorithm branches.
@@ -43,7 +53,7 @@ def estimate_envelope(
         estimator = asymmetric_kalman
 
     approximation_work, support_indices, support_values_work, diagnostics = estimator(
-        work, sampling_rate, config
+        work, sampling_rate, config, valid_mask=effective_valid_mask
     )
     if config.side == "lower":
         approximation = approximation_work
@@ -60,7 +70,7 @@ def estimate_envelope(
             sampling_rate,
             config.quantile,
             config.side,
-            valid_mask,
+            effective_valid_mask,
         )
     )
     diagnostics.update(
@@ -79,7 +89,7 @@ def estimate_envelope(
     return EnvelopeResult(
         approximation=np.asarray(approximation, dtype=np.float64),
         residual=np.asarray(residual, dtype=np.float64),
-        valid_mask=valid_mask,
+        valid_mask=effective_valid_mask,
         support_indices=np.asarray(support_indices, dtype=np.int64),
         support_values=np.asarray(support_values, dtype=np.float64),
         diagnostics=diagnostics,

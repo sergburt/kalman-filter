@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike
 
-from .kalman import asymmetric_kalman
+from .kalman import KalmanStepTrace, asymmetric_kalman
 from .metrics import envelope_metrics
 from .minima import minima_spline
 from .models import SOFTWARE_VERSION, EnvelopeConfig, EnvelopeResult
@@ -21,6 +21,7 @@ def estimate_envelope(
     config: EnvelopeConfig | None = None,
     *,
     valid_mask: ArrayLike | None = None,
+    trace_out: dict[str, KalmanStepTrace] | None = None,
 ) -> EnvelopeResult:
     """Estimate a lower or upper signal envelope.
 
@@ -52,8 +53,14 @@ def estimate_envelope(
     else:
         estimator = asymmetric_kalman
 
+    estimator_options: dict[str, Any] = {"valid_mask": effective_valid_mask}
+    if config.method == "kalman":
+        estimator_options["trace_out"] = trace_out
     approximation_work, support_indices, support_values_work, diagnostics = estimator(
-        work, sampling_rate, config, valid_mask=effective_valid_mask
+        work,
+        sampling_rate,
+        config,
+        **estimator_options,
     )
     if config.side == "lower":
         approximation = approximation_work

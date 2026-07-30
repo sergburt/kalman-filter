@@ -11,8 +11,10 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
+from lowpoint.central import centered_rolling_median, symmetric_kalman_trend
 from lowpoint.filtering import preprocess_signal
 from lowpoint.io import export_frame, infer_sampling_rate, numeric_columns, read_table
+from lowpoint.kalman import KalmanStepTrace
 from lowpoint.metrics import truth_metrics
 from lowpoint.models import EnvelopeConfig, SignalFilterConfig
 from lowpoint.pipeline import estimate_envelope
@@ -23,13 +25,20 @@ METHOD_LABELS = {
     "Guarded block minima + PCHIP (literal)": "minima",
     "Experimental causal Kalman (expectile-like)": "kalman",
 }
+DEFAULT_METHOD_LABEL = "Experimental causal Kalman (expectile-like)"
 
 SYNTHETIC_SCENARIOS = {
     "Default ECG (noise + isolated impulses)": "none",
     "Sustained contact / movement artifact": "sustained_contact_movement",
 }
 
-APP_RESULT_SCHEMA_VERSION = 2
+FORMULA_ESTIMATORS = (
+    "Asymmetric Kalman envelope",
+    "Symmetric central Kalman",
+    "Centered rolling median",
+)
+
+APP_RESULT_SCHEMA_VERSION = 4
 
 
 def _jsonable(value: object) -> object:
@@ -74,6 +83,15 @@ def _plot_result(bundle: dict[str, object]) -> go.Figure:
     truth = bundle.get("truth")
     synthetic_baseline = bundle.get("synthetic_baseline")
     synthetic_artifact = bundle.get("synthetic_artifact")
+    comparison_visibility = bundle.get("comparison_visibility", {})
+    show_primary_approximation = bool(
+        result.config.method != "kalman"
+        or comparison_visibility.get("asymmetric_kalman", True)
+    )
+    show_central_kalman = bool(comparison_visibility.get("central_kalman", False))
+    show_rolling_median = bool(comparison_visibility.get("rolling_median", False))
+    central_kalman = bundle.get("central_kalman_trend")
+    rolling_median = bundle.get("rolling_median_trend")
     simulated_dropout_excluded = bool(bundle.get("simulated_dropout_excluded", False))
     dropout_gating_confirmed = bool(
         simulated_dropout_excluded
@@ -90,7 +108,11 @@ def _plot_result(bundle: dict[str, object]) -> go.Figure:
         row_heights=[0.30, 0.46, 0.24],
         subplot_titles=(
             "Raw and conditioned signal",
-            "Conditioned signal and envelope",
+            (
+                "Conditioned signal with envelope and central comparisons"
+                if result.config.method == "kalman"
+                else "Conditioned signal and envelope"
+            ),
             "Conditioned signal minus envelope",
         ),
     )
@@ -136,16 +158,46 @@ def _plot_result(bundle: dict[str, object]) -> go.Figure:
         row=2,
         col=1,
     )
-    figure.add_trace(
-        go.Scattergl(
-            x=time[index],
-            y=result.approximation[index],
-            name="Estimated envelope",
-            line={"color": "#e11d48", "width": 2.5},
-        ),
-        row=2,
-        col=1,
-    )
+    if show_primary_approximation:
+        approximation_name = (
+            f"Asymmetric {result.config.side} Kalman envelope"
+            if result.config.method == "kalman"
+            else "Estimated envelope"
+        )
+        figure.add_trace(
+            go.Scattergl(
+                x=time[index],
+                y=result.approximation[index],
+                name=approximation_name,
+                line={"color": "#e11d48", "width": 2.5},
+            ),
+            row=2,
+            col=1,
+        )
+    if show_central_kalman and central_kalman is not None:
+        central_array = np.asarray(central_kalman)
+        figure.add_trace(
+            go.Scattergl(
+                x=time[index],
+                y=central_array[index],
+                name="Symmetric central Kalman trend",
+                line={"color": "#2563eb", "width": 2.2},
+            ),
+            row=2,
+            col=1,
+        )
+    if show_rolling_median and rolling_median is not None:
+        median_array = np.asarray(rolling_median)
+        figure.add_trace(
+            go.Scattergl(
+                x=time[index],
+                y=median_array[index],
+                name="Centered rolling median (offline)",
+                line={"color": "#d97706", "width": 2.0, "dash": "dash"},
+            ),
+            row=2,
+            col=1,
+        )
     if truth is not None:
         truth_array = np.asarray(truth)
         figure.add_trace(
@@ -179,6 +231,35 @@ def _plot_result(bundle: dict[str, object]) -> go.Figure:
                 mode="markers",
                 name="Guarded low-point supports",
                 marker={"color": "#f59e0b", "size": 7, "symbol": "diamond"},
+            ),
+            row=2,
+            col=1,
+        )
+    selected_sample_index = bundle.get("formula_selected_index")
+    selected_estimator = str(bundle.get("formula_selected_estimator", FORMULA_ESTIMATORS[0]))
+    if selected_sample_index is not None:
+        selected_index = int(np.clip(int(selected_sample_index), 0, time.size - 1))
+        if selected_estimator == FORMULA_ESTIMATORS[1] and central_kalman is not None:
+            selected_curve = np.asarray(central_kalman)
+            selected_color = "#2563eb"
+        elif selected_estimator == FORMULA_ESTIMATORS[2] and rolling_median is not None:
+            selected_curve = np.asarray(rolling_median)
+            selected_color = "#d97706"
+        else:
+            selected_curve = np.asarray(result.approximation)
+            selected_color = "#e11d48"
+        figure.add_trace(
+            go.Scatter(
+                x=[time[selected_index]],
+                y=[selected_curve[selected_index]],
+                mode="markers",
+                name="Selected formula sample",
+                marker={
+                    "color": selected_color,
+                    "size": 12,
+                    "symbol": "circle",
+                    "line": {"color": "#0f172a", "width": 2},
+                },
             ),
             row=2,
             col=1,
@@ -237,6 +318,15 @@ def _plot_result(bundle: dict[str, object]) -> go.Figure:
                     col=1,
                     **dropout_options,
                 )
+    if selected_sample_index is not None:
+        selected_index = int(np.clip(int(selected_sample_index), 0, time.size - 1))
+        for row in range(1, 4):
+            figure.add_vline(
+                x=float(time[selected_index]),
+                line={"color": "#0f172a", "width": 1.2, "dash": "dot"},
+                row=row,
+                col=1,
+            )
     figure.update_xaxes(title_text="Time (s)", row=3, col=1)
     figure.update_yaxes(title_text="Amplitude", row=1, col=1)
     figure.update_yaxes(title_text="Amplitude", row=2, col=1)
@@ -248,6 +338,401 @@ def _plot_result(bundle: dict[str, object]) -> go.Figure:
         legend={"orientation": "h", "yanchor": "bottom", "y": 1.05, "x": 0},
     )
     return figure
+
+
+def _format_formula_value(value: float) -> str:
+    if not np.isfinite(value):
+        return r"\text{unavailable}"
+    return f"{float(value):.6g}"
+
+
+def _display_amplitude(trace: KalmanStepTrace, normalized: float, orientation: float) -> float:
+    return float(orientation * (trace.location + trace.scale * normalized))
+
+
+def _display_rate(trace: KalmanStepTrace, normalized: float, orientation: float) -> float:
+    return float(orientation * trace.scale * normalized)
+
+
+def _render_kalman_formula(
+    trace: KalmanStepTrace,
+    selected_index: int,
+    *,
+    estimator_name: str,
+    orientation: float,
+    asymmetric: bool,
+) -> None:
+    index = selected_index
+    side_description = (
+        "The upper-envelope calculation mirrors the conditioned signal internally; the final "
+        "level and rate below are converted back to the graph's amplitude direction."
+        if orientation < 0
+        else "The equations use the conditioned signal after fixed warm-up normalization."
+    )
+    st.markdown(f"**{estimator_name}**")
+    st.caption(side_description)
+    st.markdown("General formula (symbols only)")
+    if asymmetric:
+        weight_formula = (
+            r"w_k=\begin{cases}1-\tau,&e_k<0\\\tau,&e_k\geq0\end{cases}"
+        )
+        weighting_note = (
+            "The asymmetric envelope deliberately gives opposite correction strengths to "
+            "measurements below and above its prediction."
+        )
+    else:
+        weight_formula = r"w_k=0.5\quad\text{for either innovation sign}"
+        weighting_note = (
+            "The central Kalman is symmetric: high and low deviations receive the same weight."
+        )
+    st.latex(
+        r"""
+        \begin{aligned}
+        \mathbf{x}^{-}_k &= \mathbf{F}\mathbf{x}_{k-1},
+        &\mathbf{F}&=\begin{bmatrix}1&\Delta t\\0&1\end{bmatrix},
+        &\mathbf{P}^{-}_k&=\mathbf{F}\mathbf{P}_{k-1}\mathbf{F}^{T}+\mathbf{Q}\\
+        e_k&=z_k-\ell^{-}_k,
+        &R_{\mathrm{eff},k}&=R/w_k,
+        &S_k&=P^{-}_{00,k}+R_{\mathrm{eff},k}\\
+        \widetilde e_k&=\operatorname{clip}
+        \left(e_k,\,-c\sqrt{S_k},\,c\sqrt{S_k}\right),
+        &\mathbf{K}_k&=\mathbf{P}^{-}_k\mathbf{H}^{T}/S_k,
+        &\mathbf{x}_k&=\mathbf{x}^{-}_k+\mathbf{K}_k\widetilde e_k
+        \end{aligned}
+        """
+    )
+    st.latex(weight_formula)
+    st.caption(weighting_note)
+
+    previous_level = float(trace.previous_level[index])
+    previous_rate = float(trace.previous_rate[index])
+    predicted_level = float(trace.predicted_level[index])
+    predicted_rate = float(trace.predicted_rate[index])
+    prior_level = float(trace.prior_level[index])
+    prior_rate = float(trace.prior_rate[index])
+    measurement = float(trace.measurement[index])
+    displayed_measurement = _display_amplitude(trace, measurement, orientation)
+    displayed_prior = _display_amplitude(trace, prior_level, orientation)
+    displayed_prior_rate = _display_rate(trace, prior_rate, orientation)
+    displayed_prediction = _display_amplitude(trace, predicted_level, orientation)
+    displayed_prediction_rate = _display_rate(trace, predicted_rate, orientation)
+
+    st.markdown("Selected sample with actual values")
+    if index == 0:
+        st.info(
+            "Sample 0 uses the robustly initialized level and zero rate directly; there is no "
+            "earlier posterior to predict from."
+        )
+        st.latex(
+            rf"""
+            \mathbf{{x}}^-_0=\mathbf{{x}}_{{\mathrm{{init}}}}
+            =\begin{{bmatrix}}
+            {_format_formula_value(predicted_level)}\\
+            {_format_formula_value(predicted_rate)}
+            \end{{bmatrix}}
+            """
+        )
+    else:
+        st.latex(
+            rf"""
+            \begin{{aligned}}
+            \ell^-_{{{index}}}
+            &= {_format_formula_value(previous_level)}
+            + {_format_formula_value(trace.dt)}
+            ({_format_formula_value(previous_rate)})
+            = {_format_formula_value(predicted_level)}\\
+            r^-_{{{index}}}
+            &= {_format_formula_value(previous_rate)}
+            = {_format_formula_value(predicted_rate)}
+            \end{{aligned}}
+            """
+        )
+    if not bool(trace.measurement_used[index]):
+        final_level = float(trace.posterior_level[index])
+        displayed_final = _display_amplitude(trace, final_level, orientation)
+        st.warning(
+            "This sample is marked invalid (the known simulated dropout), so this is a "
+            "prediction-only step. The measurement update is skipped: no innovation, weight, "
+            "gain, or corrected measurement is invented."
+        )
+        st.latex(
+            rf"""
+            \begin{{aligned}}
+            \text{{invalid sample}}\;&\Longrightarrow\;
+            \mathbf{{x}}_{{{index}}}=\mathbf{{x}}^-_{{{index}}}\\
+            \ell_{{{index}}}&={_format_formula_value(final_level)}
+            \quad\Longrightarrow\quad
+            y_{{\mathrm{{display}}}}={_format_formula_value(displayed_final)}
+            \end{{aligned}}
+            """
+        )
+        st.markdown(
+            "\n".join(
+                [
+                    f"1. Predict the level/rate: **{displayed_prediction:.6g}** and "
+                    f"**{displayed_prediction_rate:.6g} amplitude units/s**.",
+                    f"2. The stored sample value (**{displayed_measurement:.6g}**) is excluded "
+                    "by the external validity mask.",
+                    f"3. Keep the prediction as the final plotted estimate: "
+                    f"**{displayed_final:.6g}**.",
+                ]
+            )
+        )
+        return
+
+    innovation = float(trace.innovation[index])
+    tail_weight = float(trace.tail_weight[index])
+    effective_measurement_variance = float(trace.effective_measurement_variance[index])
+    innovation_variance = float(trace.innovation_variance[index])
+    innovation_limit = float(trace.innovation_limit[index])
+    clipped_innovation = float(trace.clipped_innovation[index])
+    gain_level = float(trace.gain_level[index])
+    gain_rate = float(trace.gain_rate[index])
+    posterior_level = float(trace.posterior_level[index])
+    posterior_rate = float(trace.posterior_rate[index])
+    displayed_final = _display_amplitude(trace, posterior_level, orientation)
+    displayed_final_rate = _display_rate(trace, posterior_rate, orientation)
+    if bool(trace.reacquisition[index]):
+        st.info(
+            "This is the first valid sample after a dropout. Before using it, the tracker resets "
+            "the stale rate to zero and restores conservative level uncertainty for "
+            "reacquisition."
+        )
+    st.latex(
+        rf"""
+        \begin{{aligned}}
+        z_{{{index}}}
+        &=\frac{{y^\ast_{{{index}}}-({_format_formula_value(trace.location)})}}
+        {{{_format_formula_value(trace.scale)}}}
+        = {_format_formula_value(measurement)}\\
+        e_{{{index}}}
+        &= {_format_formula_value(measurement)}
+        - ({_format_formula_value(prior_level)})
+        = {_format_formula_value(innovation)}\\
+        w_{{{index}}}&={_format_formula_value(tail_weight)},\qquad
+        R_{{\mathrm{{eff}}}}=
+        \frac{{{_format_formula_value(trace.measurement_variance)}}}
+        {{{_format_formula_value(tail_weight)}}}
+        ={_format_formula_value(effective_measurement_variance)}\\
+        S_{{{index}}}
+        &= {_format_formula_value(trace.prior_covariance_00[index])}
+        + {_format_formula_value(effective_measurement_variance)}
+        = {_format_formula_value(innovation_variance)}\\
+        \widetilde e_{{{index}}}
+        &=\operatorname{{clip}}\left(
+        {_format_formula_value(innovation)},\,
+        \pm {_format_formula_value(innovation_limit)}
+        \right)
+        = {_format_formula_value(clipped_innovation)}\\
+        K_\ell&=
+        \frac{{{_format_formula_value(trace.prior_covariance_00[index])}}}
+        {{{_format_formula_value(innovation_variance)}}}
+        ={_format_formula_value(gain_level)},\qquad
+        K_r=
+        \frac{{{_format_formula_value(trace.prior_covariance_01[index])}}}
+        {{{_format_formula_value(innovation_variance)}}}
+        ={_format_formula_value(gain_rate)}\\
+        \ell_{{{index}}}
+        &= {_format_formula_value(prior_level)}
+        + {_format_formula_value(gain_level)}
+        ({_format_formula_value(clipped_innovation)})
+        = {_format_formula_value(posterior_level)}\\
+        r_{{{index}}}
+        &= {_format_formula_value(prior_rate)}
+        + {_format_formula_value(gain_rate)}
+        ({_format_formula_value(clipped_innovation)})
+        = {_format_formula_value(posterior_rate)}
+        \end{{aligned}}
+        """
+    )
+    st.markdown(
+        "\n".join(
+            [
+                f"1. Predict the plotted level/rate: **{displayed_prediction:.6g}** and "
+                f"**{displayed_prediction_rate:.6g} amplitude units/s**.",
+                f"2. Use measurement **{displayed_measurement:.6g}**; in normalized "
+                f"coordinates its innovation is **{innovation:.6g}**.",
+                f"3. Apply weight **{tail_weight:.6g}**, gain "
+                f"**({gain_level:.6g}, {gain_rate:.6g})**, and clipped innovation "
+                f"**{clipped_innovation:.6g}**.",
+                f"4. Final plotted level/rate: **{displayed_final:.6g}** and "
+                f"**{displayed_final_rate:.6g} amplitude units/s** "
+                f"(update prior was {displayed_prior:.6g}, {displayed_prior_rate:.6g}/s).",
+            ]
+        )
+    )
+
+
+def _compact_sorted_values(values: np.ndarray, maximum: int = 12) -> str:
+    if values.size <= maximum:
+        shown = values
+        return "[" + ", ".join(f"{value:.6g}" for value in shown) + "]"
+    edge = maximum // 2
+    beginning = ", ".join(f"{value:.6g}" for value in values[:edge])
+    ending = ", ".join(f"{value:.6g}" for value in values[-edge:])
+    return f"[{beginning}, …, {ending}]"
+
+
+def _render_median_formula(bundle: dict[str, object], selected_index: int) -> None:
+    filter_result = bundle["filter_result"]
+    result = bundle["result"]
+    time = np.asarray(bundle["time"])
+    conditioned_signal = np.asarray(filter_result.processed_signal)
+    valid = np.asarray(result.valid_mask, dtype=bool)
+    median = np.asarray(bundle["rolling_median_trend"])
+    diagnostics = bundle["rolling_median_diagnostics"]
+    window_samples = int(diagnostics["window_samples"])
+    half_window = window_samples // 2
+    start = max(0, selected_index - half_window)
+    stop = min(conditioned_signal.size, selected_index + half_window + 1)
+    window_valid = valid[start:stop]
+    valid_values = conditioned_signal[start:stop][window_valid]
+    sorted_values = np.sort(valid_values)
+
+    st.markdown("**Centered rolling median**")
+    st.warning(
+        "This comparison is offline and non-predictive: a centered window can use samples after "
+        "the selected time. It is a numerical central summary, not a clinical ECG baseline."
+    )
+    st.markdown("General formula (symbols only)")
+    st.latex(
+        r"""
+        \widehat m_k
+        =\operatorname{median}
+        \left(\left\{y_j:\,
+        j\in[k-h,k+h]\cap[0,N-1],\;\mathrm{valid}_j\right\}\right)
+        """
+    )
+    st.caption(
+        "Sort the valid values in the centered window. Use the middle value for an odd count, "
+        "or the mean of the two middle values for an even count."
+    )
+    st.markdown("Selected sample with actual values")
+    st.write(
+        f"Centered window: indices {start}–{stop - 1} "
+        f"({time[start]:.6g}–{time[stop - 1]:.6g} s); "
+        f"{valid_values.size} of {stop - start} samples are valid."
+    )
+    if sorted_values.size == 0:
+        st.warning(
+            "No valid sample exists in this selected centered window, so there is no direct "
+            "median to calculate here. The displayed rolling-median trend value was filled by "
+            "interpolation from neighboring finite window medians."
+        )
+        st.latex(
+            rf"""
+            \mathcal{{V}}_{{{selected_index}}}=\varnothing
+            \quad\Longrightarrow\quad
+            \operatorname{{median}}(\mathcal{{V}}_{{{selected_index}}})
+            \text{{ is unavailable}}
+            """
+        )
+        st.write(f"Displayed interpolated trend value: {median[selected_index]:.6g}.")
+        return
+
+    calculated_median = float(np.median(sorted_values))
+    st.write("Sorted valid values (compact view): " + _compact_sorted_values(sorted_values))
+    if sorted_values.size % 2:
+        middle = sorted_values.size // 2
+        substitution = (
+            rf"\widehat m_{{{selected_index}}}"
+            rf"=v_{{({middle + 1})}}={_format_formula_value(calculated_median)}"
+        )
+        middle_description = f"middle sorted value {middle + 1}"
+    else:
+        upper_middle = sorted_values.size // 2
+        lower_value = float(sorted_values[upper_middle - 1])
+        upper_value = float(sorted_values[upper_middle])
+        substitution = (
+            rf"\widehat m_{{{selected_index}}}"
+            rf"=\frac{{{_format_formula_value(lower_value)}"
+            rf"+{_format_formula_value(upper_value)}}}{{2}}"
+            rf"={_format_formula_value(calculated_median)}"
+        )
+        middle_description = (
+            f"mean of sorted values {upper_middle} and {upper_middle + 1}"
+        )
+    st.latex(substitution)
+    st.markdown(
+        "\n".join(
+            [
+                f"1. Take indices **{start}–{stop - 1}** around sample "
+                f"**{selected_index}**.",
+                f"2. Exclude **{(stop - start) - valid_values.size}** invalid sample(s), then "
+                f"sort the remaining **{valid_values.size}** values.",
+                f"3. Select the {middle_description}: **{calculated_median:.6g}**.",
+                f"4. The stored plotted value is **{median[selected_index]:.6g}**.",
+            ]
+        )
+    )
+
+
+def _render_formula_panel(bundle: dict[str, object]) -> None:
+    time = np.asarray(bundle["time"])
+    default_index = time.size // 2
+    retained_index = int(st.session_state.get("formula_sample_index", default_index))
+    selected_index = int(np.clip(retained_index, 0, time.size - 1))
+    if retained_index != selected_index:
+        st.session_state["formula_sample_index"] = selected_index
+    retained_estimator = str(
+        st.session_state.get("formula_estimator", FORMULA_ESTIMATORS[0])
+    )
+    if retained_estimator not in FORMULA_ESTIMATORS:
+        retained_estimator = FORMULA_ESTIMATORS[0]
+        st.session_state["formula_estimator"] = retained_estimator
+
+    st.subheader("Interactive formula walkthrough")
+    st.caption(
+        "Move the sample slider to place the dark marker on the graph and inspect the exact "
+        "calculation at that index. Chart-click synchronization can be added later."
+    )
+    selected_estimator = st.radio(
+        "Estimator to explain",
+        FORMULA_ESTIMATORS,
+        horizontal=True,
+        key="formula_estimator",
+    )
+    selected_index = st.slider(
+        "Selected sample index",
+        min_value=0,
+        max_value=int(time.size - 1),
+        value=selected_index,
+        step=1,
+        key="formula_sample_index",
+    )
+    st.caption(
+        f"Sample {selected_index} of {time.size - 1} · time {time[selected_index]:.6g} s"
+    )
+    if selected_estimator == FORMULA_ESTIMATORS[0]:
+        trace = bundle.get("primary_kalman_trace")
+        if trace is None:
+            st.warning("Per-sample Kalman details are unavailable. Run the approximation again.")
+            return
+        result = bundle["result"]
+        orientation = 1.0 if result.config.side == "lower" else -1.0
+        _render_kalman_formula(
+            trace,
+            selected_index,
+            estimator_name=f"Asymmetric {result.config.side} Kalman envelope",
+            orientation=orientation,
+            asymmetric=True,
+        )
+    elif selected_estimator == FORMULA_ESTIMATORS[1]:
+        trace = bundle.get("central_kalman_trace")
+        if trace is None:
+            st.warning("Per-sample central Kalman details are unavailable. Run again.")
+            return
+        _render_kalman_formula(
+            trace,
+            selected_index,
+            estimator_name="Symmetric central Kalman trend",
+            orientation=1.0,
+            asymmetric=False,
+        )
+    elif bundle.get("rolling_median_trend") is None:
+        st.warning("Rolling-median details are unavailable. Run the approximation again.")
+    else:
+        _render_median_formula(bundle, selected_index)
 
 
 def main() -> None:
@@ -657,7 +1142,13 @@ def main() -> None:
 
         st.divider()
         st.header("Approximation")
-        method_label = st.selectbox("Method", list(METHOD_LABELS), index=0, key="envelope_method")
+        method_options = list(METHOD_LABELS)
+        method_label = st.selectbox(
+            "Method",
+            method_options,
+            index=method_options.index(DEFAULT_METHOD_LABEL),
+            key="envelope_method",
+        )
         method = METHOD_LABELS[method_label]
         side = st.selectbox("Envelope side", ["lower", "upper"], index=0)
         tau_label = "Asymmetry τ" if method == "kalman" else "Tail level τ"
@@ -760,6 +1251,49 @@ def main() -> None:
             kalman_r = defaults.kalman_measurement_variance
             kalman_clip = defaults.kalman_innovation_clip
             kalman_warmup = defaults.kalman_warmup_seconds
+        if method == "kalman":
+            with st.expander("Graph comparison lines", expanded=True):
+                st.caption(
+                    "Each switch controls one curve on the main graph. The central Kalman uses "
+                    "the same responsiveness settings as the asymmetric Kalman."
+                )
+                show_asymmetric_kalman = st.toggle(
+                    f"Show asymmetric {side} Kalman",
+                    value=True,
+                    key="show_asymmetric_kalman",
+                )
+                show_central_kalman = st.toggle(
+                    "Show symmetric central Kalman",
+                    value=True,
+                    key="show_central_kalman",
+                )
+                show_rolling_median = st.toggle(
+                    "Show centered rolling median",
+                    value=True,
+                    key="show_rolling_median",
+                )
+                rolling_median_window = st.slider(
+                    "Rolling median window (s)",
+                    min_value=0.05,
+                    max_value=2.00,
+                    value=0.40,
+                    step=0.05,
+                    key="rolling_median_window",
+                    disabled=not show_rolling_median,
+                    help=(
+                        "A longer window is smoother. This is a centered offline summary that "
+                        "uses past and future samples; it is not predictive."
+                    ),
+                )
+                st.caption(
+                    "The central curves are numerical comparisons, not clinical ECG baselines. "
+                    "The rolling median is offline and non-predictive."
+                )
+        else:
+            show_asymmetric_kalman = True
+            show_central_kalman = False
+            show_rolling_median = False
+            rolling_median_window = 0.40
         process = st.button("Run pipeline", type="primary", width="stretch", key="run_pipeline")
 
     filter_config = SignalFilterConfig(
@@ -793,12 +1327,21 @@ def main() -> None:
         kalman_innovation_clip=float(kalman_clip),
         kalman_warmup_seconds=float(kalman_warmup),
     )
+    comparison_visibility = {
+        "asymmetric_kalman": bool(show_asymmetric_kalman),
+        "central_kalman": bool(show_central_kalman),
+        "rolling_median": bool(show_rolling_median),
+    }
     run_signature = json.dumps(
         {
             "app_result_schema_version": APP_RESULT_SCHEMA_VERSION,
             "input": input_identity,
             "conditioning": filter_config.to_dict(),
             "envelope": config.to_dict(),
+            "central_comparisons": {
+                "enabled": method == "kalman",
+                "rolling_median_window_seconds": float(rolling_median_window),
+            },
         },
         sort_keys=True,
     )
@@ -809,6 +1352,9 @@ def main() -> None:
             with st.spinner("Conditioning signal and estimating envelope…"):
                 filter_result = preprocess_signal(signal, float(sampling_rate), filter_config)
                 estimator_valid_mask = np.asarray(filter_result.valid_mask).copy()
+                primary_trace_out: dict[str, KalmanStepTrace] | None = (
+                    {} if method == "kalman" else None
+                )
                 simulated_dropout_excluded = bool(
                     method == "kalman"
                     and exclude_synthetic_dropout
@@ -823,7 +1369,32 @@ def main() -> None:
                     float(sampling_rate),
                     config,
                     valid_mask=estimator_valid_mask,
+                    trace_out=primary_trace_out,
                 )
+                primary_kalman_trace = (
+                    primary_trace_out.get("trace") if primary_trace_out is not None else None
+                )
+                central_kalman = None
+                central_kalman_diagnostics = None
+                central_kalman_trace = None
+                rolling_median = None
+                rolling_median_diagnostics = None
+                if method == "kalman":
+                    central_trace_out: dict[str, KalmanStepTrace] = {}
+                    central_kalman, central_kalman_diagnostics = symmetric_kalman_trend(
+                        filter_result.processed_signal,
+                        float(sampling_rate),
+                        config,
+                        valid_mask=estimator_valid_mask,
+                        trace_out=central_trace_out,
+                    )
+                    central_kalman_trace = central_trace_out["trace"]
+                    rolling_median, rolling_median_diagnostics = centered_rolling_median(
+                        filter_result.processed_signal,
+                        float(sampling_rate),
+                        float(rolling_median_window),
+                        valid_mask=estimator_valid_mask,
+                    )
         except (ValueError, RuntimeError) as exc:
             st.error(str(exc))
             return
@@ -855,6 +1426,13 @@ def main() -> None:
                     and "reacquisition_updates" in result.diagnostics
                 )
             ),
+            "comparison_visibility": comparison_visibility,
+            "primary_kalman_trace": primary_kalman_trace,
+            "central_kalman_trend": central_kalman,
+            "central_kalman_diagnostics": central_kalman_diagnostics,
+            "central_kalman_trace": central_kalman_trace,
+            "rolling_median_trend": rolling_median,
+            "rolling_median_diagnostics": rolling_median_diagnostics,
         }
         if (
             demo is not None
@@ -879,6 +1457,7 @@ def main() -> None:
             "Run the approximation to refresh the result."
         )
         return
+    bundle["comparison_visibility"] = comparison_visibility
     result = bundle["result"]
     diagnostics = result.diagnostics
     filter_result = bundle["filter_result"]
@@ -996,6 +1575,11 @@ def main() -> None:
             "Kalman mode estimates an asymmetric expectile-like track, not an exact quantile. "
             "Use the offline quantile method when calibrated tail coverage matters."
         )
+        st.caption(
+            "Graph comparisons: the blue symmetric Kalman weights high and low deviations "
+            "equally. The dashed amber rolling median is centered, uses future samples, and is "
+            "not predictive. Neither central curve is a clinical ECG baseline."
+        )
         if bundle["pipeline_causal"]:
             st.success(
                 "The conditioning + Kalman approximation path is causal with the current "
@@ -1020,7 +1604,24 @@ def main() -> None:
             "so a 5% curve intentionally lies above its geometric minimum. Select guarded minima "
             "for one trough per cycle, or investigate a smaller τ with stronger artifact checks."
         )
+    if result.config.method == "kalman":
+        retained_formula_index = int(
+            st.session_state.get("formula_sample_index", len(bundle["time"]) // 2)
+        )
+        bundle["formula_selected_index"] = int(
+            np.clip(retained_formula_index, 0, len(bundle["time"]) - 1)
+        )
+        retained_formula_estimator = str(
+            st.session_state.get("formula_estimator", FORMULA_ESTIMATORS[0])
+        )
+        bundle["formula_selected_estimator"] = (
+            retained_formula_estimator
+            if retained_formula_estimator in FORMULA_ESTIMATORS
+            else FORMULA_ESTIMATORS[0]
+        )
     st.plotly_chart(_plot_result(bundle), width="stretch", config={"displaylogo": False})
+    if result.config.method == "kalman":
+        _render_formula_panel(bundle)
 
     output_frame = export_frame(
         np.asarray(bundle["time"]),
@@ -1033,6 +1634,10 @@ def main() -> None:
         removed_component=np.asarray(filter_result.removed_component),
         estimator_valid_mask=result.valid_mask,
     )
+    if bundle.get("central_kalman_trend") is not None:
+        output_frame["symmetric_central_kalman"] = np.asarray(bundle["central_kalman_trend"])
+    if bundle.get("rolling_median_trend") is not None:
+        output_frame["centered_rolling_median"] = np.asarray(bundle["rolling_median_trend"])
     download_left, download_right = st.columns(2)
     download_left.download_button(
         "Download processed CSV",
@@ -1048,6 +1653,28 @@ def main() -> None:
         "envelope_config": result.config.to_dict(),
         "conditioning_diagnostics": filter_diagnostics,
         "envelope_diagnostics": diagnostics,
+        "central_comparisons": {
+            "visibility": bundle["comparison_visibility"],
+            "symmetric_kalman": bundle.get("central_kalman_diagnostics"),
+            "rolling_median": bundle.get("rolling_median_diagnostics"),
+            "interpretation": (
+                "Central numerical comparisons on conditioned_signal; neither is a clinical "
+                "ECG baseline. The centered rolling median is offline and non-predictive."
+            ),
+        },
+        "formula_walkthrough": (
+            {
+                "selected_estimator": bundle.get("formula_selected_estimator"),
+                "selected_sample_index": bundle.get("formula_selected_index"),
+                "selected_time_seconds": float(
+                    np.asarray(bundle["time"])[int(bundle["formula_selected_index"])]
+                ),
+                "kalman_values_source": "same estimator recursion as plotted output",
+                "chart_click_synchronization": False,
+            }
+            if result.config.method == "kalman"
+            else None
+        ),
         "pipeline": {
             "envelope_target": "conditioned_signal",
             "residual_definition": "conditioned_signal - envelope_on_conditioned",

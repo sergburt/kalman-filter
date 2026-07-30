@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
@@ -12,12 +13,48 @@ from .preprocessing import robust_location_scale
 from .support import guarded_block_minima
 
 
+@dataclass(frozen=True)
+class KalmanStepTrace:
+    """Exact normalized terms used by every Kalman predict/update step."""
+
+    previous_level: NDArray[np.float64]
+    previous_rate: NDArray[np.float64]
+    predicted_level: NDArray[np.float64]
+    predicted_rate: NDArray[np.float64]
+    prior_level: NDArray[np.float64]
+    prior_rate: NDArray[np.float64]
+    prior_covariance_00: NDArray[np.float64]
+    prior_covariance_01: NDArray[np.float64]
+    prior_covariance_11: NDArray[np.float64]
+    measurement: NDArray[np.float64]
+    innovation: NDArray[np.float64]
+    tail_weight: NDArray[np.float64]
+    effective_measurement_variance: NDArray[np.float64]
+    innovation_variance: NDArray[np.float64]
+    innovation_limit: NDArray[np.float64]
+    clipped_innovation: NDArray[np.float64]
+    gain_level: NDArray[np.float64]
+    gain_rate: NDArray[np.float64]
+    posterior_level: NDArray[np.float64]
+    posterior_rate: NDArray[np.float64]
+    measurement_used: NDArray[np.bool_]
+    reacquisition: NDArray[np.bool_]
+    location: float
+    scale: float
+    dt: float
+    quantile: float
+    process_variance: float
+    measurement_variance: float
+    innovation_clip: float
+
+
 def asymmetric_kalman(
     y: NDArray[np.float64],
     sampling_rate: float,
     config: EnvelopeConfig,
     *,
     valid_mask: NDArray[np.bool_] | None = None,
+    trace_out: dict[str, KalmanStepTrace] | None = None,
 ) -> tuple[NDArray[np.float64], NDArray[np.int64], NDArray[np.float64], dict[str, Any]]:
     """Track a low *expectile* online with a local-linear-trend state model.
 
@@ -68,18 +105,68 @@ def asymmetric_kalman(
     clipped_innovations = 0
     skipped_measurement_updates = 0
     reacquisition_updates = 0
+    trace_float_fields = (
+        {
+            name: np.full(work.size, np.nan, dtype=np.float64)
+            for name in (
+                "previous_level",
+                "previous_rate",
+                "predicted_level",
+                "predicted_rate",
+                "prior_level",
+                "prior_rate",
+                "prior_covariance_00",
+                "prior_covariance_01",
+                "prior_covariance_11",
+                "measurement",
+                "innovation",
+                "tail_weight",
+                "effective_measurement_variance",
+                "innovation_variance",
+                "innovation_limit",
+                "clipped_innovation",
+                "gain_level",
+                "gain_rate",
+                "posterior_level",
+                "posterior_rate",
+            )
+        }
+        if trace_out is not None
+        else None
+    )
+    trace_measurement_used = (
+        np.zeros(work.size, dtype=bool) if trace_out is not None else None
+    )
+    trace_reacquisition = np.zeros(work.size, dtype=bool) if trace_out is not None else None
 
     for index, sample in enumerate(work):
+        if trace_float_fields is not None:
+            trace_float_fields["previous_level"][index] = state[0]
+            trace_float_fields["previous_rate"][index] = state[1]
         if index > 0:
             state = transition @ state
             covariance = transition @ covariance @ transition.T + process_noise
+        if trace_float_fields is not None:
+            trace_float_fields["predicted_level"][index] = state[0]
+            trace_float_fields["predicted_rate"][index] = state[1]
 
         if not valid[index]:
             skipped_measurement_updates += 1
+            if trace_float_fields is not None:
+                trace_float_fields["prior_level"][index] = state[0]
+                trace_float_fields["prior_rate"][index] = state[1]
+                trace_float_fields["prior_covariance_00"][index] = covariance[0, 0]
+                trace_float_fields["prior_covariance_01"][index] = covariance[0, 1]
+                trace_float_fields["prior_covariance_11"][index] = covariance[1, 1]
+                trace_float_fields["measurement"][index] = sample
+                trace_float_fields["posterior_level"][index] = state[0]
+                trace_float_fields["posterior_rate"][index] = state[1]
             estimate[index] = state[0]
             continue
         if index > 0 and not valid[index - 1]:
             reacquisition_updates += 1
+            if trace_reacquisition is not None:
+                trace_reacquisition[index] = True
             state[1] = 0.0
             covariance = np.diag(
                 [
@@ -88,6 +175,13 @@ def asymmetric_kalman(
                 ]
             )
 
+        if trace_float_fields is not None:
+            trace_float_fields["prior_level"][index] = state[0]
+            trace_float_fields["prior_rate"][index] = state[1]
+            trace_float_fields["prior_covariance_00"][index] = covariance[0, 0]
+            trace_float_fields["prior_covariance_01"][index] = covariance[0, 1]
+            trace_float_fields["prior_covariance_11"][index] = covariance[1, 1]
+            trace_float_fields["measurement"][index] = sample
         innovation = float(sample - observation @ state)
         tail_weight = (1.0 - config.quantile) if innovation < 0 else config.quantile
         effective_measurement_variance = config.kalman_measurement_variance / max(tail_weight, 1e-6)
@@ -100,14 +194,45 @@ def asymmetric_kalman(
             clipped_innovations += 1
 
         gain = covariance @ observation / innovation_variance
+        if trace_float_fields is not None and trace_measurement_used is not None:
+            trace_measurement_used[index] = True
+            trace_float_fields["innovation"][index] = innovation
+            trace_float_fields["tail_weight"][index] = tail_weight
+            trace_float_fields["effective_measurement_variance"][index] = (
+                effective_measurement_variance
+            )
+            trace_float_fields["innovation_variance"][index] = innovation_variance
+            trace_float_fields["innovation_limit"][index] = limit
+            trace_float_fields["clipped_innovation"][index] = clipped
+            trace_float_fields["gain_level"][index] = gain[0]
+            trace_float_fields["gain_rate"][index] = gain[1]
         state = state + gain * clipped
         update = identity - np.outer(gain, observation)
         covariance = (
             update @ covariance @ update.T + np.outer(gain, gain) * effective_measurement_variance
         )
+        if trace_float_fields is not None:
+            trace_float_fields["posterior_level"][index] = state[0]
+            trace_float_fields["posterior_rate"][index] = state[1]
         estimate[index] = state[0]
 
     approximation = estimate * scale + location
+    if trace_out is not None:
+        assert trace_float_fields is not None
+        assert trace_measurement_used is not None
+        assert trace_reacquisition is not None
+        trace_out["trace"] = KalmanStepTrace(
+            **trace_float_fields,
+            measurement_used=trace_measurement_used,
+            reacquisition=trace_reacquisition,
+            location=float(location),
+            scale=float(scale),
+            dt=float(dt),
+            quantile=float(config.quantile),
+            process_variance=float(config.kalman_process_variance),
+            measurement_variance=float(config.kalman_measurement_variance),
+            innovation_clip=float(config.kalman_innovation_clip),
+        )
     support_indices, support_values, support_diagnostics = guarded_block_minima(
         y,
         sampling_rate,
@@ -142,3 +267,23 @@ def asymmetric_kalman(
         **support_diagnostics,
     }
     return approximation, support_indices, support_values, diagnostics
+
+
+def kalman_step_trace(
+    y: NDArray[np.float64],
+    sampling_rate: float,
+    config: EnvelopeConfig,
+    *,
+    valid_mask: NDArray[np.bool_] | None = None,
+) -> tuple[NDArray[np.float64], KalmanStepTrace, dict[str, Any]]:
+    """Return the approximation plus the exact terms used at each sample."""
+
+    trace_out: dict[str, KalmanStepTrace] = {}
+    approximation, _, _, diagnostics = asymmetric_kalman(
+        y,
+        sampling_rate,
+        config,
+        valid_mask=valid_mask,
+        trace_out=trace_out,
+    )
+    return approximation, trace_out["trace"], diagnostics

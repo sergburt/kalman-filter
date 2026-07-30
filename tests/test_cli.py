@@ -46,6 +46,7 @@ def test_cli_processes_consistent_time_and_rate(tmp_path: Path) -> None:
         "envelope_on_conditioned",
         "conditioned_minus_envelope",
         "original_sample_valid",
+        "estimator_sample_valid",
     ]
 
 

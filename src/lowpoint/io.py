@@ -52,20 +52,23 @@ def export_frame(
     processed_signal: np.ndarray | None = None,
     baseline_estimate: np.ndarray | None = None,
     removed_component: np.ndarray | None = None,
+    estimator_valid_mask: np.ndarray | None = None,
 ) -> pd.DataFrame:
     raw_signal = np.asarray(signal)
     conditioned = raw_signal if processed_signal is None else np.asarray(processed_signal)
     baseline = np.zeros_like(conditioned) if baseline_estimate is None else baseline_estimate
     removed = np.zeros_like(conditioned) if removed_component is None else removed_component
-    return pd.DataFrame(
-        {
-            "time_s": time,
-            "raw_signal": raw_signal,
-            "conditioned_signal": conditioned,
-            "estimated_baseline": baseline,
-            "removed_component": removed,
-            "envelope_on_conditioned": approximation,
-            "conditioned_minus_envelope": residual,
-            "original_sample_valid": valid_mask,
-        }
+    columns = {
+        "time_s": time,
+        "raw_signal": raw_signal,
+        "conditioned_signal": conditioned,
+        "estimated_baseline": baseline,
+        "removed_component": removed,
+        "envelope_on_conditioned": approximation,
+        "conditioned_minus_envelope": residual,
+        "original_sample_valid": valid_mask,
+    }
+    columns["estimator_sample_valid"] = (
+        valid_mask if estimator_valid_mask is None else estimator_valid_mask
     )
+    return pd.DataFrame(columns)

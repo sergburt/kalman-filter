@@ -24,7 +24,11 @@ the middle,” with ECG as the motivating example.
 - CSV/TSV upload, synthetic ECG demo, interactive Plotly inspection, explicit raw/conditioned
   coordinates, support points, tail calibration, diagnostics, CSV export, and a reproducibility
   manifest.
-- A reusable Python API and CLI, deterministic synthetic generators, 72 automated tests, and a
+- An opt-in synthetic **sustained contact / movement artifact** scenario with an abrupt level
+  shift, several seconds of faster movement-like noise, and an optional short held-value
+  flatline/dropout. This is a technical signal-quality simulation, not a diagnosis or guaranteed
+  identification of a particular electrode.
+- A reusable Python API and CLI, deterministic synthetic generators, 79 automated tests, and a
   reproducible validation benchmark.
 
 The full mathematical, biomedical, validation, risk, and implementation discussion is in
@@ -40,6 +44,20 @@ uv run streamlit run app.py
 ```
 
 Then open the local address shown by Streamlit. The built-in ECG example requires no data file.
+
+To inspect the sustained-event response, choose **Sustained contact / movement artifact** under
+**Built-in ECG scenario**, adjust its event controls if desired, select the asymmetric Kalman
+method, and run the pipeline. **Exclude known dropout from Kalman updates** is enabled by default
+when the optional dropout is present. It uses the simulation's exact known mask: samples in the
+darker interval get prediction-only Kalman steps, then the stale local slope is cleared and state
+uncertainty is conservatively restored for reacquisition at the first clean sample. The residual
+plot is blank over excluded samples. This demonstrates handling of an externally supplied
+signal-quality flag; it does not detect signal loss or identify an electrode in real data.
+
+The orange plot region marks the full event and the darker region marks the optional dropout at
+its end. Compare both **Estimated envelope** and **Conditioned signal minus envelope** across the
+shaded interval and immediately after clean ECG resumes. Disable the exclusion toggle to compare
+the deliberately ungated behavior.
 
 ### Streamlit Community Cloud
 
@@ -124,6 +142,13 @@ Q/R then depend on the raw amplitude unit. A hostile future suffix cannot alter 
 estimates. Guarded support markers and full-record summary metrics remain offline diagnostics, and
 the offline quantile and minima methods are not streaming estimators.
 
+In Kalman mode, invalid samples skip the measurement update. The state and covariance are
+predicted through the gap; at the first valid sample, stale local-trend velocity is cleared and a
+conservative normalized level-variance floor is restored before updating. Diagnostics report
+`skipped_measurement_updates`, `reacquisition_updates`, and the reacquisition policy. These masks
+must come from acquisition metadata or a separately validated signal-quality rule; the Kalman
+tracker does not infer electrode status.
+
 For quantile mode, at least one nominal `smoothness_hz` cutoff cycle must fit in the observed
 record. The UI enforces this record-length-dependent lower bound. The core raises a clear error for
 slower requests; use a longer record or downsample before fitting. The solver uses a symmetric
@@ -170,6 +195,7 @@ The output columns deliberately encode their coordinate system:
 | `envelope_on_conditioned` | Lower/upper approximation fitted in conditioned coordinates |
 | `conditioned_minus_envelope` | `conditioned_signal - envelope_on_conditioned` |
 | `original_sample_valid` | Whether the corresponding raw input sample was finite |
+| `estimator_sample_valid` | Whether the sample was eligible for estimator updates and metrics |
 
 The Streamlit manifest additionally records the uploaded-file SHA-256 identity, input selections,
 conditioning and envelope configurations, both diagnostic sets, and approximation-path causality

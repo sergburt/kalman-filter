@@ -146,6 +146,26 @@ def test_kalman_zero_warmup_is_invariant_to_extreme_future_scale() -> None:
     assert full.diagnostics["normalization_scope"] == "initialization_window"
 
 
+def test_kalman_invalid_samples_are_prediction_only_and_value_independent() -> None:
+    _time, signal, _truth = generate_positive_biosignal(
+        duration_seconds=10.0,
+        sampling_rate=100.0,
+    )
+    valid_mask = np.ones(signal.size, dtype=bool)
+    valid_mask[450:500] = False
+    contaminated = signal.copy()
+    contaminated[450:500] = -10_000.0
+    config = EnvelopeConfig(method="kalman", kalman_warmup_seconds=1.0)
+
+    reference = estimate_envelope(signal, 100.0, config, valid_mask=valid_mask)
+    hostile = estimate_envelope(contaminated, 100.0, config, valid_mask=valid_mask)
+
+    np.testing.assert_allclose(hostile.approximation, reference.approximation, atol=1e-12)
+    assert hostile.diagnostics["skipped_measurement_updates"] == 50
+    assert hostile.diagnostics["reacquisition_updates"] == 1
+    assert hostile.diagnostics["measurement_updates"] == signal.size - 50
+
+
 def test_nan_result_preserves_original_validity_mask() -> None:
     signal = np.sin(np.linspace(0, 10, 500))
     signal[100:110] = np.nan

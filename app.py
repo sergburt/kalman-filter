@@ -24,6 +24,13 @@ METHOD_LABELS = {
     "Experimental causal Kalman (expectile-like)": "kalman",
 }
 
+SYNTHETIC_SCENARIOS = {
+    "Default ECG (noise + isolated impulses)": "none",
+    "Sustained contact / movement artifact": "sustained_contact_movement",
+}
+
+APP_RESULT_SCHEMA_VERSION = 2
+
 
 def _jsonable(value: object) -> object:
     if isinstance(value, (np.floating, np.integer)):
@@ -66,6 +73,13 @@ def _plot_result(bundle: dict[str, object]) -> go.Figure:
     result = bundle["result"]
     truth = bundle.get("truth")
     synthetic_baseline = bundle.get("synthetic_baseline")
+    synthetic_artifact = bundle.get("synthetic_artifact")
+    simulated_dropout_excluded = bool(bundle.get("simulated_dropout_excluded", False))
+    dropout_gating_confirmed = bool(
+        simulated_dropout_excluded
+        and "skipped_measurement_updates" in result.diagnostics
+        and "reacquisition_updates" in result.diagnostics
+    )
     index = _decimation_indices(time.size)
 
     figure = make_subplots(
@@ -169,10 +183,13 @@ def _plot_result(bundle: dict[str, object]) -> go.Figure:
             row=2,
             col=1,
         )
+    residual_display = np.asarray(result.residual).copy()
+    if dropout_gating_confirmed and synthetic_artifact is not None:
+        residual_display[synthetic_artifact.dropout_mask] = np.nan
     figure.add_trace(
         go.Scattergl(
             x=time[index],
-            y=result.residual[index],
+            y=residual_display[index],
             name="Residual",
             line={"color": "#0369a1", "width": 1.2},
             showlegend=False,
@@ -181,6 +198,45 @@ def _plot_result(bundle: dict[str, object]) -> go.Figure:
         col=1,
     )
     figure.add_hline(y=0, line={"color": "#94a3b8", "width": 1}, row=3, col=1)
+    if synthetic_artifact is not None:
+        for row in range(1, 4):
+            event_options: dict[str, object] = {}
+            if row == 1:
+                event_options = {
+                    "annotation_text": "Simulated contact / movement event",
+                    "annotation_position": "top left",
+                }
+            figure.add_vrect(
+                x0=synthetic_artifact.start_seconds,
+                x1=synthetic_artifact.end_seconds,
+                fillcolor="#f97316",
+                opacity=0.10,
+                line_width=0,
+                row=row,
+                col=1,
+                **event_options,
+            )
+            if synthetic_artifact.dropout_start_seconds is not None:
+                dropout_options: dict[str, object] = {}
+                if row == 1:
+                    dropout_options = {
+                        "annotation_text": (
+                            "Known-invalid dropout: prediction only"
+                            if dropout_gating_confirmed
+                            else "Optional flatline / dropout"
+                        ),
+                        "annotation_position": "bottom left",
+                    }
+                figure.add_vrect(
+                    x0=synthetic_artifact.dropout_start_seconds,
+                    x1=synthetic_artifact.dropout_end_seconds,
+                    fillcolor="#475569",
+                    opacity=0.16,
+                    line_width=0,
+                    row=row,
+                    col=1,
+                    **dropout_options,
+                )
     figure.update_xaxes(title_text="Time (s)", row=3, col=1)
     figure.update_yaxes(title_text="Amplitude", row=1, col=1)
     figure.update_yaxes(title_text="Amplitude", row=2, col=1)
@@ -213,6 +269,7 @@ def main() -> None:
     frame = None
     jitter = 0.0
     rate_mismatch = 0.0
+    exclude_synthetic_dropout = False
     if source == "Built-in ECG example":
         with st.sidebar:
             duration = st.slider("Duration (s)", 5.0, 30.0, 12.0, 1.0)
@@ -222,7 +279,118 @@ def main() -> None:
             heart_rate = st.slider("Heart rate (bpm)", 45.0, 150.0, 72.0, 1.0)
             noise = st.slider("Noise standard deviation", 0.0, 0.08, 0.015, 0.005)
             spikes = st.slider("Negative impulse artifacts", 0, 8, 2, 1)
-        demo = generate_ecg(duration, sampling_rate, heart_rate, noise, negative_spikes=spikes)
+            scenario_label = st.selectbox(
+                "Built-in ECG scenario",
+                list(SYNTHETIC_SCENARIOS),
+                key="synthetic_scenario",
+                help=(
+                    "The sustained scenario is a technical signal-quality simulation. It is not "
+                    "a diagnosis or guaranteed identification of a particular electrode."
+                ),
+            )
+            artifact_mode = SYNTHETIC_SCENARIOS[scenario_label]
+            if artifact_mode == "sustained_contact_movement":
+                st.caption(
+                    "Adds an abrupt level shift and several seconds of movement-like faster "
+                    "noise. This demonstrates estimator response to degraded acquisition quality."
+                )
+                artifact_start_max = max(0.5, duration - 2.25)
+                artifact_start_default = _clamp_float_widget(
+                    "artifact_start_widget",
+                    min(4.0, artifact_start_max),
+                    0.0,
+                    artifact_start_max,
+                )
+                artifact_start = st.slider(
+                    "Artifact event start (s)",
+                    min_value=0.0,
+                    max_value=float(artifact_start_max),
+                    value=artifact_start_default,
+                    step=0.25,
+                    key="artifact_start_widget",
+                )
+                artifact_duration_max = duration - artifact_start
+                artifact_duration_default = _clamp_float_widget(
+                    "artifact_duration_widget",
+                    min(4.0, artifact_duration_max),
+                    2.0,
+                    artifact_duration_max,
+                )
+                artifact_duration = st.slider(
+                    "Sustained event duration (s)",
+                    min_value=2.0,
+                    max_value=float(artifact_duration_max),
+                    value=artifact_duration_default,
+                    step=0.25,
+                    key="artifact_duration_widget",
+                )
+                artifact_shift = st.slider(
+                    "Abrupt level shift",
+                    min_value=-0.80,
+                    max_value=0.80,
+                    value=-0.45,
+                    step=0.05,
+                    key="artifact_shift_widget",
+                )
+                movement_noise = st.slider(
+                    "Movement-like noise standard deviation",
+                    min_value=0.02,
+                    max_value=0.30,
+                    value=0.12,
+                    step=0.01,
+                    key="movement_noise_widget",
+                )
+                include_dropout = st.toggle(
+                    "Include short flatline / dropout",
+                    value=True,
+                    key="synthetic_dropout",
+                )
+                if include_dropout:
+                    dropout_duration_max = min(1.0, artifact_duration)
+                    dropout_duration_default = _clamp_float_widget(
+                        "dropout_duration_widget",
+                        0.35,
+                        0.10,
+                        dropout_duration_max,
+                    )
+                    dropout_duration = st.slider(
+                        "Flatline / dropout duration (s)",
+                        min_value=0.10,
+                        max_value=float(dropout_duration_max),
+                        value=dropout_duration_default,
+                        step=0.05,
+                        key="dropout_duration_widget",
+                    )
+                    exclude_synthetic_dropout = st.toggle(
+                        "Exclude known dropout from Kalman updates",
+                        value=True,
+                        key="exclude_synthetic_dropout",
+                        help=(
+                            "Uses the generator's exact dropout mask for this demonstration. "
+                            "It does not detect signal loss in real data or identify an electrode."
+                        ),
+                    )
+                else:
+                    dropout_duration = 0.0
+            else:
+                artifact_start = None
+                artifact_duration = 4.0
+                artifact_shift = -0.45
+                movement_noise = 0.12
+                dropout_duration = 0.0
+        demo = generate_ecg(
+            duration,
+            sampling_rate,
+            heart_rate,
+            noise,
+            negative_spikes=spikes,
+            artifact_mode=artifact_mode,
+            artifact_start_seconds=artifact_start,
+            artifact_duration_seconds=artifact_duration,
+            artifact_level_shift=artifact_shift,
+            movement_noise_std=movement_noise,
+            dropout_duration_seconds=dropout_duration,
+        )
         time = demo.time
         signal = demo.signal
         source_name = "synthetic_ecg"
@@ -233,7 +401,18 @@ def main() -> None:
             "heart_rate": heart_rate,
             "noise": noise,
             "negative_spikes": spikes,
+            "scenario": artifact_mode,
         }
+        if demo.artifact is not None:
+            input_identity["artifact"] = {
+                "start_seconds": demo.artifact.start_seconds,
+                "end_seconds": demo.artifact.end_seconds,
+                "level_shift": demo.artifact.level_shift,
+                "movement_noise_std": demo.artifact.movement_noise_std,
+                "dropout_start_seconds": demo.artifact.dropout_start_seconds,
+                "dropout_end_seconds": demo.artifact.dropout_end_seconds,
+                "exclude_from_kalman_updates": exclude_synthetic_dropout,
+            }
     else:
         with st.sidebar:
             uploaded = st.file_uploader("Data file", type=["csv", "tsv", "txt"])
@@ -616,6 +795,7 @@ def main() -> None:
     )
     run_signature = json.dumps(
         {
+            "app_result_schema_version": APP_RESULT_SCHEMA_VERSION,
             "input": input_identity,
             "conditioning": filter_config.to_dict(),
             "envelope": config.to_dict(),
@@ -628,11 +808,21 @@ def main() -> None:
         try:
             with st.spinner("Conditioning signal and estimating envelope…"):
                 filter_result = preprocess_signal(signal, float(sampling_rate), filter_config)
+                estimator_valid_mask = np.asarray(filter_result.valid_mask).copy()
+                simulated_dropout_excluded = bool(
+                    method == "kalman"
+                    and exclude_synthetic_dropout
+                    and demo is not None
+                    and demo.artifact is not None
+                    and np.any(demo.artifact.dropout_mask)
+                )
+                if simulated_dropout_excluded:
+                    estimator_valid_mask &= ~demo.artifact.dropout_mask
                 result = estimate_envelope(
                     filter_result.processed_signal,
                     float(sampling_rate),
                     config,
-                    valid_mask=filter_result.valid_mask,
+                    valid_mask=estimator_valid_mask,
                 )
         except (ValueError, RuntimeError) as exc:
             st.error(str(exc))
@@ -657,6 +847,14 @@ def main() -> None:
             "run_signature": run_signature,
             "pipeline_causal": pipeline_causal,
             "pipeline_causal_after_initialization": pipeline_causal_after_initialization,
+            "simulated_dropout_excluded": simulated_dropout_excluded,
+            "dropout_gating_confirmed": bool(
+                not simulated_dropout_excluded
+                or (
+                    "skipped_measurement_updates" in result.diagnostics
+                    and "reacquisition_updates" in result.diagnostics
+                )
+            ),
         }
         if (
             demo is not None
@@ -666,6 +864,8 @@ def main() -> None:
             bundle["truth"] = demo.true_lower_envelope
             bundle["synthetic_baseline"] = demo.baseline_wander
             result.diagnostics.update(truth_metrics(result.approximation, demo.true_lower_envelope))
+        if demo is not None and demo.artifact is not None:
+            bundle["synthetic_artifact"] = demo.artifact
         st.session_state["result_bundle"] = bundle
 
     if "result_bundle" not in st.session_state:
@@ -674,7 +874,10 @@ def main() -> None:
 
     bundle = st.session_state["result_bundle"]
     if bundle.get("run_signature") != run_signature:
-        st.info("Input or parameters changed. Run the approximation to refresh the result.")
+        st.info(
+            "Input, parameters, or the result schema changed. "
+            "Run the approximation to refresh the result."
+        )
         return
     result = bundle["result"]
     diagnostics = result.diagnostics
@@ -729,6 +932,63 @@ def main() -> None:
     for warning in filter_diagnostics["warnings"]:
         st.warning(warning)
 
+    if "synthetic_artifact" in bundle:
+        st.info(
+            "The orange region is a simulated signal-quality event, not a diagnostic finding or "
+            "proof that a specific electrode caused the change. Its clean synthetic truth stays "
+            "unchanged so the envelope and residual response to contamination is visible."
+        )
+        if bundle.get("simulated_dropout_excluded", False):
+            skipped_updates = diagnostics.get("skipped_measurement_updates")
+            reacquisition_updates = diagnostics.get("reacquisition_updates")
+            dropout_gating_confirmed = bool(
+                bundle.get(
+                    "dropout_gating_confirmed",
+                    skipped_updates is not None and reacquisition_updates is not None,
+                )
+            )
+            exclusion_columns = st.columns(3)
+            exclusion_columns[0].metric(
+                "Excluded dropout samples",
+                skipped_updates if skipped_updates is not None else "Unavailable",
+            )
+            exclusion_columns[1].metric(
+                "Kalman reacquisitions",
+                reacquisition_updates if reacquisition_updates is not None else "Unavailable",
+            )
+            exclusion_columns[2].metric(
+                "Dropout update policy",
+                "Prediction only" if dropout_gating_confirmed else "Refresh required",
+            )
+            if dropout_gating_confirmed:
+                st.success(
+                    "The darker dropout interval uses the generator's known-invalid mask: Kalman "
+                    "measurement updates are skipped, the local trend is reacquired at the first "
+                    "clean sample, and the residual is intentionally blank in that interval. This "
+                    "is a controlled demonstration, not automatic signal-quality detection."
+                )
+                if filter_diagnostics["filtering_active"]:
+                    st.warning(
+                        "Conditioning ran before dropout exclusion, so filter transients can still "
+                        "carry some dropout influence. Disable conditioning for the clearest "
+                        "Kalman reacquisition demonstration."
+                    )
+            else:
+                st.warning(
+                    "This retained result was produced without the new Kalman dropout diagnostics, "
+                    "so prediction-only gating cannot be confirmed. Restart the Streamlit server "
+                    "if it was hot-reloaded, then run the approximation again."
+                )
+        elif (
+            exclude_synthetic_dropout
+            and result.config.method != "kalman"
+            and np.any(bundle["synthetic_artifact"].dropout_mask)
+        ):
+            st.info(
+                "Known-dropout exclusion is a Kalman measurement-update demonstration. The "
+                "current offline approximation method only shows the shaded dropout interval."
+            )
+
     if result.config.method == "kalman":
         lookahead_samples = int(diagnostics["algorithmic_lookahead_samples"])
         lookahead_seconds = lookahead_samples / float(sampling_rate)
@@ -767,10 +1027,11 @@ def main() -> None:
         np.asarray(filter_result.raw_signal),
         result.approximation,
         result.residual,
-        result.valid_mask,
+        filter_result.valid_mask,
         processed_signal=np.asarray(filter_result.processed_signal),
         baseline_estimate=np.asarray(filter_result.baseline_estimate),
         removed_component=np.asarray(filter_result.removed_component),
+        estimator_valid_mask=result.valid_mask,
     )
     download_left, download_right = st.columns(2)
     download_left.download_button(
@@ -795,6 +1056,13 @@ def main() -> None:
                 "pipeline_causal_after_initialization"
             ],
             "support_markers_and_summary_metrics_streaming_ready": False,
+            "simulated_dropout_exclusion_requested": bool(
+                bundle.get("simulated_dropout_excluded", False)
+            ),
+            "simulated_dropout_excluded_from_kalman_updates": bool(
+                bundle.get("simulated_dropout_excluded", False)
+                and bundle.get("dropout_gating_confirmed", False)
+            ),
         },
     }
     download_right.download_button(

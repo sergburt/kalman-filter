@@ -1,3 +1,4 @@
+import numpy as np
 from streamlit.testing.v1 import AppTest
 
 
@@ -19,6 +20,56 @@ def test_default_pipeline_runs_with_known_truth() -> None:
     assert [heading.value for heading in app.subheader] == ["Result"]
     assert "Known-truth RMSE" in {metric.label for metric in app.metric}
     assert len(app.get("plotly_chart")) == 1
+
+
+def test_sustained_contact_scenario_runs_and_records_signal_quality_event() -> None:
+    app = _app()
+    app.selectbox("synthetic_scenario").set_value("Sustained contact / movement artifact").run()
+    app.selectbox("envelope_method").set_value(
+        "Experimental causal Kalman (expectile-like)"
+    ).run()
+    app.button("run_pipeline").click().run()
+
+    assert not app.exception
+    bundle = app.session_state["result_bundle"]
+    assert bundle["input_identity"]["scenario"] == "sustained_contact_movement"
+    assert "synthetic_artifact" in bundle
+    artifact = bundle["synthetic_artifact"]
+    assert np.count_nonzero(artifact.event_mask) >= 3 * 250
+    assert np.count_nonzero(artifact.dropout_mask) > 0
+    assert bundle["simulated_dropout_excluded"] is True
+    result = bundle["result"]
+    assert result.diagnostics["skipped_measurement_updates"] == np.count_nonzero(
+        artifact.dropout_mask
+    )
+    assert result.diagnostics["reacquisition_updates"] == 1
+    assert not np.any(result.valid_mask[artifact.dropout_mask])
+    assert any(
+        "simulated signal-quality event" in str(message.value) for message in app.info
+    )
+    assert any("known-invalid mask" in str(message.value) for message in app.success)
+    assert len(app.get("plotly_chart")) == 1
+
+
+def test_retained_preupdate_kalman_result_does_not_raise_missing_diagnostics() -> None:
+    app = _app()
+    app.selectbox("synthetic_scenario").set_value("Sustained contact / movement artifact").run()
+    app.selectbox("envelope_method").set_value(
+        "Experimental causal Kalman (expectile-like)"
+    ).run()
+    app.button("run_pipeline").click().run()
+
+    bundle = app.session_state["result_bundle"]
+    bundle["result"].diagnostics.pop("skipped_measurement_updates")
+    bundle["result"].diagnostics.pop("reacquisition_updates")
+    bundle["dropout_gating_confirmed"] = False
+    app.run()
+
+    assert not app.exception
+    assert any(
+        "without the new Kalman dropout diagnostics" in str(message.value)
+        for message in app.warning
+    )
 
 
 def test_conditioning_changes_target_and_hides_raw_truth_metric() -> None:
